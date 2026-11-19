@@ -22,6 +22,12 @@ const MAGAZINE = 12;
 const RELOAD_TIME = 1.25;
 const GUN_SPREAD = 0.012;
 
+/** The SMG's magazine, its wider cone and its faster repeat. */
+const SMG_MAGAZINE = 30;
+const SMG_SPREAD = 0.045;
+const SMG_COOLDOWN = 0.095;
+const SMG_DAMAGE = 34;
+
 const scratchOrigin = new THREE.Vector3();
 const scratchDirection = new THREE.Vector3();
 
@@ -56,6 +62,11 @@ export function createCombat(scene, city, options = {}) {
     ammo: MAGAZINE,
     magazine: MAGAZINE,
     reserve: 48,
+    smg: false,
+    /** The full automatic's own magazine and reserve: bought at Pier 4, kept apart from the
+     *  pistol so a reload of one never empties the other. */
+    smgAmmo: 0,
+    smgReserve: 0,
     health: 100,
     gunOut: true,
     punchCooldown: 0,
@@ -74,7 +85,30 @@ export function createCombat(scene, city, options = {}) {
     player.group.add(pistol.group);
     pistol.group.position.set(0.3, 1.34, 0.22);
     pistol.group.rotation.set(0, 0, 0.06);
+    // The SMG is the same rig scaled up, so a single visible-group flag serves both guns.
+    pistol.group.add(buildSmgBody());
     return pistol;
+  }
+
+  /** The SMG's own body over the pistol rig: a longer shroud and a magazine. */
+  function buildSmgBody() {
+    const group = new THREE.Group();
+    const dark = new THREE.MeshLambertMaterial({ color: '#181d24' });
+    const steel = new THREE.MeshLambertMaterial({ color: '#49525d' });
+    const shroud = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.55), steel);
+    shroud.position.set(0, 0.04, 0.19);
+    const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.22), dark);
+    barrel.position.set(0, 0.04, 0.53);
+    const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.26, 0.1), dark);
+    magazine.position.set(0, -0.19, 0.06);
+    magazine.rotation.x = 0.16;
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.07, 0.24), steel);
+    stock.position.set(0, 0.02, -0.18);
+    group.add(shroud, barrel, magazine, stock);
+    group.name = 'smg';
+    group.visible = false;
+    group.userData.smg = true;
+    return group;
   }
 
   /** The world-space eye and aim: the camera looks where the shots go. */
@@ -185,20 +219,38 @@ export function createCombat(scene, city, options = {}) {
     return far > 0 ? far : 0;
   }
 
-  /** Fires the pistol at the camera's aim. Returns true when a round left the barrel. */
+  /** The gun in hand: the SMG once it is bought, else the pistol. */
+  function weapon() {
+    return state.smg ? 'smg' : 'pistol';
+  }
+
+  /** Rounds in the gun in hand, and its magazine size. */
+  function currentAmmo() {
+    return state.smg ? state.smgAmmo : state.ammo;
+  }
+
+  function magazineSize() {
+    return state.smg ? SMG_MAGAZINE : MAGAZINE;
+  }
+
+  /** Fires the gun in hand at the camera's aim. Returns true when a round left the barrel. */
   function fire(fromPlayer = true) {
-    if (state.reloadTimer > 0 || state.ammo <= 0 || state.fireCooldown > 0) {
-      if (state.ammo <= 0 && state.reloadTimer <= 0) reload();
+    const ammo = currentAmmo();
+    if (state.reloadTimer > 0 || ammo <= 0 || state.fireCooldown > 0) {
+      if (ammo <= 0 && state.reloadTimer <= 0) reload();
       return false;
     }
-    state.ammo -= 1;
-    state.fireCooldown = GUN_COOLDOWN;
+    if (state.smg) state.smgAmmo -= 1;
+    else state.ammo -= 1;
+    state.fireCooldown = state.smg ? SMG_COOLDOWN : GUN_COOLDOWN;
     state.lastShotAt = elapsed;
     const { origin, direction } = aimRay();
-    // A little spread, seeded by the shot's own time so replays are not identical.
-    direction.x += (Math.random() - 0.5) * GUN_SPREAD;
-    direction.y += (Math.random() - 0.5) * GUN_SPREAD;
-    direction.z += (Math.random() - 0.5) * GUN_SPREAD;
+    // A little spread, wider on the automatic, seeded by the shot's own time so a replay
+    // is never identical.
+    const spread = state.smg ? SMG_SPREAD : GUN_SPREAD;
+    direction.x += (Math.random() - 0.5) * spread;
+    direction.y += (Math.random() - 0.5) * spread;
+    direction.z += (Math.random() - 0.5) * spread;
     direction.normalize();
 
     const hit = raycast(origin, direction);
@@ -213,13 +265,14 @@ export function createCombat(scene, city, options = {}) {
     if (fromPlayer) effects.onShot?.(hit);
 
     if (hit.kind === 'pedestrian') {
-      pedestrians.hit(hit.target, GUN_DAMAGE, player.position.x, player.position.z, PUNCH_SCATTER);
+      pedestrians.hit(hit.target, state.smg ? SMG_DAMAGE : GUN_DAMAGE,
+        player.position.x, player.position.z, PUNCH_SCATTER);
       effects.spark?.(hit.point.x, hit.point.y, hit.point.z, '#ff6a52');
       effects.onHit?.('pedestrian', hit.target, GUN_DAMAGE);
     } else if (hit.kind === 'officer') {
-      police?.damageOfficer(hit.target, GUN_DAMAGE);
+      police?.damageOfficer(hit.target, state.smg ? SMG_DAMAGE : GUN_DAMAGE);
       effects.spark?.(hit.point.x, hit.point.y, hit.point.z, '#ffb36a');
-      effects.onHit?.('officer', hit.target, GUN_DAMAGE);
+      effects.onHit?.('officer', hit.target, state.smg ? SMG_DAMAGE : GUN_DAMAGE);
     } else if (hit.kind === 'car' || hit.kind === 'policeCar') {
       effects.spark?.(hit.point.x, hit.point.y, hit.point.z, '#ffd27a');
       effects.onHit?.(hit.kind, hit.target, GUN_DAMAGE);
@@ -272,16 +325,26 @@ export function createCombat(scene, city, options = {}) {
   }
 
   function reload() {
-    if (state.reloadTimer > 0 || state.ammo === state.magazine || state.reserve <= 0) return false;
-    state.reloadTimer = RELOAD_TIME;
+    const mag = magazineSize();
+    const ammo = currentAmmo();
+    const reserve = state.smg ? state.smgReserve : state.reserve;
+    if (state.reloadTimer > 0 || ammo >= mag || reserve <= 0) return false;
+    state.reloadTimer = state.smg ? RELOAD_TIME * 1.1 : RELOAD_TIME;
+    state.reloadMax = state.reloadTimer;
     return true;
   }
 
   function finishReload() {
-    const needed = state.magazine - state.ammo;
-    const taken = Math.min(needed, state.reserve);
-    state.ammo += taken;
-    state.reserve -= taken;
+    const mag = magazineSize();
+    if (state.smg) {
+      const taken = Math.min(mag - state.smgAmmo, state.smgReserve);
+      state.smgAmmo += taken;
+      state.smgReserve -= taken;
+    } else {
+      const taken = Math.min(mag - state.ammo, state.reserve);
+      state.ammo += taken;
+      state.reserve -= taken;
+    }
   }
 
   /** Called by main.js with the frame clock; the trigger repeats while held. */
@@ -301,6 +364,8 @@ export function createCombat(scene, city, options = {}) {
     // The arm and gun: a punch throws the right arm forward; the gun shows only on foot.
     const gun = attachGun();
     gun.group.visible = state.gunOut;
+    const smgBody = gun.group.getObjectByName('smg');
+    if (smgBody) smgBody.visible = state.smg;
     if (state.punching > 0) {
       const swing = 1 - state.punching / 0.3;
       player.group.rotation.x = -Math.sin(swing * Math.PI) * 0.12;
@@ -328,6 +393,37 @@ export function createCombat(scene, city, options = {}) {
     return state.ammo;
   }
 
+  /** Buys or restores the SMG: it is in hand from now on, never at the same time as a job. */
+  function giveSmg() {
+    state.smg = true;
+    state.smgAmmo = Math.max(state.smgAmmo, SMG_MAGAZINE);
+    if (state.smgReserve <= 0) state.smgReserve = SMG_MAGAZINE;
+    state.gunOut = true;
+    attachGun().group.visible = true;
+    const smgBody = attachGun().group.getObjectByName('smg');
+    if (smgBody) smgBody.visible = true;
+    return state.smgAmmo;
+  }
+
+  /** A shop's ammo pack: 9mm rounds to the pistol, SMG rounds once the automatic is owned. */
+  function addAmmo(rounds, kind = null) {
+    const useSmg = kind === 'smg' ? true : kind === 'pistol' ? false : state.smg;
+    if (useSmg) state.smgReserve += rounds;
+    else state.reserve += rounds;
+    return useSmg ? state.smgReserve : state.reserve;
+  }
+
+  /** Puts the owned guns back in hand after a load: pistol always, SMG when it was bought. */
+  function restoreLoadout() {
+    if (state.smg) giveSmg();
+    else givePistol();
+  }
+
+  /** The pistol's and the SMG's rounds together, for the HUD's one line. */
+  function totalAmmo() {
+    return currentAmmo();
+  }
+
   /** Damage from any source; returns the health left. main.js watches for zero. */
   function damage(amount) {
     state.health = Math.max(0, state.health - amount);
@@ -342,6 +438,19 @@ export function createCombat(scene, city, options = {}) {
     reload,
     reset,
     givePistol,
+    giveSmg,
+    addAmmo,
+    restoreLoadout,
+    totalAmmo,
+    get weapon() {
+      return weapon();
+    },
+    get reserveAmmo() {
+      return state.smg ? state.smgReserve : state.reserve;
+    },
+    get magazineSize() {
+      return magazineSize();
+    },
     damage,
     setAmmo(ammo, reserve) {
       state.ammo = Math.max(0, Math.min(MAGAZINE, Math.floor(ammo)));

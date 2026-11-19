@@ -426,8 +426,24 @@ export function createPolice(scene, city, options = {}) {
     if (car.speed > cap) throttle = -0.55;
     else if (Math.abs(difference) > 1.25 && car.speed > 8) throttle = -0.2;
     else if (Math.abs(difference) > 0.6) throttle = Math.min(throttle, 0.45);
-    // Do not ram the player at full speed on foot from far away; close the last metres slowly.
-    if (anchor.onFoot && distance < 5.5) throttle = car.speed > 5 ? -0.7 : 0;
+    // A fleeing body on foot is an arrest, not a chase: the cruiser pulls up alongside and
+    // stops, and the officers get out. Ramming only happens if it cannot stop in time.
+    if (anchor.onFoot && distance < 15) throttle = car.speed > 1.6 ? -1 : 0;
+    // Stuck against a block or a corner: put the cruiser back on the nearest lane and let it
+    // come round again. A pursuit that can be pinned forever by a fence is not a pursuit.
+    if (throttle > 0.5 && car.speed < 0.7) car.stuckTime = (car.stuckTime ?? 0) + dt;
+    else car.stuckTime = 0;
+    if (car.stuckTime > 1.3) {
+      car.stuckTime = 0;
+      const lineX = snapToLine(car.position.x);
+      const lineZ = snapToLine(car.position.z);
+      if (Math.abs(car.position.x - lineX) < Math.abs(car.position.z - lineZ)) car.position.x = lineX;
+      else car.position.z = lineZ;
+      car.heading = Math.atan2(target.x - car.position.x, target.z - car.position.z);
+      car.speed = 0;
+      car.velocity.set(0, 0, 0);
+      car.group.position.copy(car.position);
+    }
     stepCar(car, dt, {
       throttle,
       steer: Math.max(-1, Math.min(1, difference * 1.9)),

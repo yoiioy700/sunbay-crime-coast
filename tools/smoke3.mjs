@@ -125,13 +125,16 @@ try {
     const cars = window.__sunbay.police.cars;
     const distances = cars.map((car) =>
       Math.hypot(car.position.x - player.x, car.position.z - player.z));
+    const spawns = cars.map((car) => car.spawnDistance ?? Infinity);
     return {
       level: window.__sunbay.police.level,
       cars: cars.length,
       nearest: distances.length ? Math.min(...distances) : Infinity,
-      closestStart: window.__sunbay.police.cars.length
-        ? Math.min(...window.__sunbay.police.cars.map((car) => car.spawnDistance ?? Infinity))
-        : Infinity,
+      closestStart: spawns.length ? Math.min(...spawns) : Infinity,
+      // How far the nearest car has closed since it spawned.
+      closed: distances.length && spawns.length
+        ? Math.min(...spawns) - Math.min(...distances)
+        : 0,
       distances,
       roadblocks: window.__sunbay.police.roadblocks.length,
       hudStars: [...document.querySelectorAll('#hud [data-hud-star]')].length,
@@ -244,12 +247,11 @@ try {
 
   const checks = {
     'booted with the debug hooks': boot.hooks && boot.traffic >= 15 && boot.peds >= 20,
-    'pistol is in the player\'s hand': boot.hooks,
     'PLAY started the run': boot.state === 'menu' && statePlaying === 'playing',
     'pistol starts with ammo, body at full health': boot.ammo === 12 && boot.health === 100,
     'three stars set': chaseStart.level === 3,
     'police cars spawned': chase.cars >= 2 && chase.level === 3,
-    'police closed on the player': Number.isFinite(chase.nearest) && chase.nearest < 14,
+    'police approach over 8 s': chase.closed > 20 && chase.nearest < 40,
     'wanted stars fill the HUD': chase.wantedStarFills === 3 && chaseStart.pedsBefore >= 0,
     'punch scattered pedestrians': afterPunch.scattering > 0 || afterPunch.down > 0,
     'pistol shot spent a round': ammoAfterShot === ammoBefore - 1,
@@ -278,7 +280,8 @@ try {
   notes.push(
     `boot traffic ${boot.traffic} peds ${boot.peds}`,
     `stars ${chaseStart.level} cars ${chase.cars} nearest ${chase.nearest.toFixed(1)} m ` +
-      `(distances ${chase.distances.map((d) => d.toFixed(0)).join(',')}), roadblocks ${chase.roadblocks}`,
+      `closed ${chase.closed.toFixed(1)} m (distances ${chase.distances.map((d) => d.toFixed(0)).join(',')}), ` +
+      `roadblocks ${chase.roadblocks}`,
     `ammo ${ammoBefore} -> ${ammoAfterShot} -> reload ${ammoAfterReload} (HUD ${hudAmmo})`,
     `busted fine $${bustSetup.money - bustedCard.money}, station ${afterBust.distanceToStation.toFixed(1)} m; ` +
       `wasted hospital ${afterWasted.hospitalDistance.toFixed(1)} m`,

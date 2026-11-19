@@ -15,14 +15,20 @@
 import * as THREE from 'three';
 import { createCity } from './city.js';
 import { createCombat } from './combat.js';
+import { createEconomy } from './economy.js';
 import { createFollowCamera } from './camera.js';
 import { createHud } from './hud.js';
+import { createMissions } from './missions.js';
 import { createPedestrians } from './pedestrians.js';
 import { createPlayer } from './player.js';
 import { createPolice } from './police.js';
+import { createProgression } from './progression.js';
 import { createScreens } from './screens.js';
 import { createTraffic } from './traffic.js';
 import { createVehicles, exitPoint } from './vehicles.js';
+import {
+  NEW_GAME, clearSave, createAutosave, hasSave, loadSave, writeSave,
+} from './save.js';
 
 export const STATE_MENU = 'menu';
 export const STATE_PLAYING = 'playing';
@@ -30,7 +36,7 @@ export const STATE_PAUSED = 'paused';
 export const STATE_BUSTED = 'busted';
 export const STATE_WASTED = 'wasted';
 
-const START_MONEY = 1500;
+const START_MONEY = NEW_GAME.money;
 const BUSTED_RESPAWN = 3.4;
 const WASTED_RESPAWN = 3.4;
 /** Where the hospital drops a wasted player: a crossroads on the west side. */
@@ -226,6 +232,90 @@ const vehicles = createVehicles(scene, city, {
 });
 const follow = createFollowCamera(camera, canvas);
 const hud = createHud(hudRoot);
+
+// The cars that are not ambient traffic and not the player's current ride: the job's marked
+// car and the ones bought at the dealer and left on the lot. Both lists stay enterable.
+const missionCars = [];
+const garageCars = [];
+
+/** Every car a footed player may walk up to and take. */
+function enterableCars() {
+  return [...traffic.cars, ...vehicles.cars, ...missionCars, ...garageCars,
+    ...(vehicles.active ? [vehicles.active] : [])];
+}
+
+/** Builds a car into the world and files it in the list its purpose names. */
+function addCar(spec = {}) {
+  const car = vehicles.createCar(spec);
+  if (spec.missionTarget) {
+    missionCars.push(car);
+    car.health = 100;
+  } else {
+    garageCars.push(car);
+    // A car from the player's own lot is not a theft: entering it raises no wanted level.
+    car.playerOwned = true;
+    car.purchased = true;
+  }
+  return car;
+}
+
+/** Empties the job and garage lists, for a New Game or a Continue over the current world. */
+function clearExtraCars() {
+  for (const car of [...missionCars, ...garageCars]) removeCar(car);
+}
+
+/** Removes a job car: the scene and the enterable list both forget it. */
+function removeCar(car) {
+  if (!car) return;
+  const index = missionCars.indexOf(car);
+  if (index >= 0) missionCars.splice(index, 1);
+  const garageIndex = garageCars.indexOf(car);
+  if (garageIndex >= 0) garageCars.splice(garageIndex, 1);
+  scene.remove(car.group);
+}
+
+// The story's clock and unlocks.
+const progression = createProgression();
+
+// The mission chain. It owns its world marker and its target car; everything it shows outside
+// the world goes through these callbacks, so the HUD and the economy stay its only outlets.
+const missions = createMissions(scene, city, {
+  getPlayer: () => player.position,
+  getActiveCar: () => vehicles.active,
+  spawnCar: (spec) => addCar({ ...spec, missionTarget: true }),
+  despawnCar: removeCar,
+  setWanted: (level) => police.setWanted(level),
+  onObjective: (text) => hud.setObjective(text),
+  onBanner: (kind, detail) => hud.showBanner(kind, detail),
+  onReward: (amount) => {
+    economy.addMoney(amount, 'mission');
+  },
+  getMissionsDone: () => missions.done,
+  getUnlockNote: (count) => progression.unlockNote(count),
+  onMissionEnd: () => autosave.saveNow('mission'),
+});
+
+// The money and the three shops. The dealer's cars and the spray booth reach the scene and the
+// player's car through callbacks; the ammo and weapon state stays owned by combat.js.
+const economy = createEconomy(scene, hudRoot, {
+  spawnCar: (spec) => addCar(spec),
+  getMissionsDone: () => missions.done,
+  getActiveCar: () => vehicles.active,
+  onAmmo: (rounds, kind) => addAmmo(rounds, kind),
+  onWeapon: (name) => {
+    if (name === 'smg') {
+      combat.giveSmg();
+      lastHudAmmo = -1;
+    }
+  },
+  onRepaint: (color, car) => repaintCar(car, color),
+  onMoney: (amount, delta) => hud.showMoneyChange(amount, delta),
+  onPurchase: () => {
+    autosave.saveNow('purchase');
+    hud.setObjective('');
+  },
+});
+
 const police = createPolice(scene, city, {
   onBusted: triggerBusted,
   onCrime: (level) => hud.setWanted(level, 1.6),
@@ -235,19 +325,32 @@ const police = createPolice(scene, city, {
 });
 const combat = createCombat(scene, city, {
   pedestrians, police, player, camera, follow,
-  cars: () => [...traffic.cars, ...vehicles.cars, ...(vehicles.active ? [vehicles.active] : [])],
+  cars: () => [...traffic.cars, ...vehicles.cars, ...missionCars, ...garageCars,
+    ...(vehicles.active ? [vehicles.active] : [])],
   effects: {
     ...effects,
     damagePlayer: (amount) => hurt(amount),
-    onHit: (kind) => {
+    onHit: (kind, target, amount) => {
       if (kind === 'pedestrian') police.crime('pedestrian');
       else if (kind === 'officer' || kind === 'policeCar') police.crime('police');
-      else if (kind === 'car') police.crime('car');
+      else if (kind === 'car') {
+        police.crime('car');
+        if (target) missions.damageTarget(target, amount);
+      }
     },
   },
 });
 combat.givePistol();
-const screens = createScreens(screensRoot, { onPlay: startRun, onResume: resumeRun, onQuit: quitToTitle });
+const screens = createScreens(screensRoot, {
+  onPlay: playPressed,
+  onResume: resumeRun,
+  onQuit: quitToTitle,
+  onContinue: continueRun,
+  onNewGame: newGame,
+});
+
+// The save: written on every mission result, purchase, bust and 30 seconds of play.
+const autosave = createAutosave(() => collectSaveState(), { intervalMs: 30000 });
 
 const keys = { forward: 0, back: 0, left: 0, right: 0, sprint: false, handbrake: false };
 /** The car the player is beside, chosen each frame for the enter prompt and the E key. */
@@ -257,12 +360,13 @@ let state = STATE_MENU;
 let elapsed = 0;
 let last = performance.now();
 let lastDrivenSpeed = 0;
-let money = START_MONEY;
 let respawnTimer = 0;
 let respawnDeadline = 0;
 let respawnKind = null;
 let lastWantedSeen = 0;
 let lastHudAmmo = -1;
+let lastBlipSignature = '';
+let smgReserve = 0;
 
 const SUN_OFFSET = new THREE.Vector3(115, 155, 80);
 
@@ -274,13 +378,88 @@ function followSun() {
   city.sun.target.updateMatrixWorld();
 }
 
-/** Frames the body and lets the title card orbit around it. */
+/** Frames the body and lets the title card orbit around it; shows Continue when a save is read. */
 function enterMenu() {
   state = STATE_MENU;
   hud.hide();
   screens.hideOutcome();
+  const saved = loadSave();
+  screens.setSaveAvailable(Boolean(saved),
+    saved ? `$${saved.money.toLocaleString('en-US')} · ${saved.missionsDone} JOB${saved.missionsDone === 1 ? '' : 'S'} DONE` : '');
   screens.showTitle();
   follow.snap(player.position);
+}
+
+/** The state a save is written from: the player's situation, never the world's scenery. */
+function collectSaveState() {
+  // Where the player will come back: the car's seat while driving, else the body's feet.
+  const position = vehicles.active ? vehicles.active.position : player.position;
+  return {
+    money: economy.money,
+    ownedCars: economy.ownedCars.map((car) => ({ type: car.type, color: car.color })),
+    smgUnlocked: combat.state.smg,
+    ammo: combat.state.ammo,
+    reserve: combat.state.reserve,
+    smgAmmo: combat.state.smgAmmo,
+    smgReserve: combat.state.smgReserve,
+    missionsDone: missions.done,
+    activeMission: missions.active ? missions.active.id : null,
+    player: { x: position.x, z: position.z, heading: player.heading },
+    stats: progression.snapshot(),
+  };
+}
+
+/** Puts a loaded save back into the running systems. The world itself is not restored. */
+function applySaveState(data) {
+  clearExtraCars();
+  economy.restore({ money: data.money, ownedCars: data.ownedCars, smgOwned: data.smgUnlocked });
+  missions.restore({ done: data.missionsDone });
+  progression.restore(data.stats);
+  combat.setAmmo(Number.isFinite(data.ammo) ? data.ammo : NEW_GAME.ammo,
+    Number.isFinite(data.reserve) ? data.reserve : NEW_GAME.reserve);
+  if (Number.isFinite(data.smgAmmo)) combat.state.smgAmmo = data.smgAmmo;
+  if (Number.isFinite(data.smgReserve)) combat.state.smgReserve = data.smgReserve;
+  if (data.smgUnlocked) combat.giveSmg();
+  else combat.givePistol();
+  const spot = data.player ?? NEW_GAME.player;
+  player.reset(spot.x, spot.z, spot.heading);
+  follow.snap(player.position);
+  economy.respawnOwnedCars();
+  lastHudAmmo = -1;
+  lastWantedSeen = 0;
+}
+
+/** A fresh run: the store is dropped, every system reset, and the city starts at the spawn. */
+function newGame() {
+  clearSave();
+  leaveCar();
+  clearExtraCars();
+  police.reset();
+  combat.reset();
+  missions.reset();
+  progression.reset();
+  economy.reset();
+  combat.spawnAll();
+  lastHudAmmo = -1;
+  player.reset(city.spawn.x, city.spawn.z, city.spawn.heading);
+  startRun();
+}
+
+/** Continue: the last save's money, garage, guns, jobs and position. */
+function continueRun() {
+  const saved = loadSave();
+  if (!saved) {
+    startRun();
+    return;
+  }
+  applySaveState(saved);
+  startRun();
+}
+
+/** PLAY on the title: a fresh run when there is no save, a Continue when there is one. */
+function playPressed() {
+  if (hasSave()) continueRun();
+  else startRun();
 }
 
 function startRun() {
@@ -290,11 +469,14 @@ function startRun() {
   screens.hideAll();
   hud.show();
   hud.setObjective('');
-  hud.setMoney(money);
+  hud.showMoneyChange(economy.money, 0);
+  hud.hideBanner();
   combat.reset();
   police.reset();
   respawnTimer = 0;
   respawnKind = null;
+  missions.hidePhone();
+  autosave.resetClock();
   follow.snap(player.position);
   requestPointerLock();
 }
@@ -311,6 +493,11 @@ function pauseRun() {
   if (state !== STATE_PLAYING) return;
   state = STATE_PAUSED;
   resetKeys();
+  missions.hidePhone();
+  screens.setStats(progression.statsPanel({
+    missionsDone: missions.done,
+    carsOwned: economy.ownedCars.length,
+  }));
   screens.showPause();
 }
 
@@ -336,24 +523,29 @@ function endRun(kind) {
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   hud.setDriving(false);
   hud.setPrompt(null);
+  missions.hidePhone();
+  // A job the body was taken off is failed, and pays nothing.
+  missions.onPlayerDown(kind === 'busted'
+    ? 'Busted before the job was done'
+    : 'The hospital got you before the job was done');
   if (kind === 'busted') {
-    const fine = Math.min(money, 250 + police.level * 60);
-    money -= fine;
+    const fine = Math.min(economy.money, 250 + police.level * 60);
+    economy.spend(fine);
     screens.showOutcome('busted', {
       reason: `THEY RAN YOUR PLATES · WANTED LEVEL ${police.level}`,
       cost: `FINE  -$${fine.toLocaleString('en-US')}`,
       countdown: '',
     });
   } else {
-    const bill = Math.min(money, 200);
-    money -= bill;
+    const bill = Math.min(economy.money, 200);
+    economy.spend(bill);
     screens.showOutcome('wasted', {
       reason: 'THE STREET WON THIS ONE',
       cost: `HOSPITAL  -$${bill.toLocaleString('en-US')}`,
       countdown: '',
     });
   }
-  hud.setMoney(money);
+  autosave.saveNow('outcome');
   screens.setOutcomeCountdown(respawnTimer);
 }
 
@@ -383,24 +575,24 @@ function respawn() {
   hud.show();
   hud.setHealth(100);
   hud.setWanted(0, 0);
-  hud.setMoney(money);
   lastWantedSeen = 0;
   lastHudAmmo = -1;
   requestPointerLock();
 }
 
 function quitToTitle() {
+  // The title is where a session ends: write where the player stands before resetting anything.
+  autosave.saveNow('quit');
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   leaveCar();
   police.reset();
   combat.reset();
-  combat.givePistol();
   respawnTimer = 0;
   respawnKind = null;
+  missions.hidePhone();
   screens.hideOutcome();
   hud.setHealth(100);
   hud.setWanted(0, 0);
-  hud.setMoney(money);
   player.reset(city.spawn.x, city.spawn.z, city.spawn.heading);
   enterMenu();
 }
@@ -441,9 +633,10 @@ function toggleVehicle() {
     leaveCar();
     return;
   }
-  const found = vehicles.nearest(player.position, vehicles.candidatesFrom(traffic.cars), 3.8);
+  const found = vehicles.nearest(player.position, enterableCars(), 3.8);
   if (!found) return;
   traffic.release(found.car);
+  if (found.car.purchased) found.car.playerOwned = true;
   if (!vehicles.enter(found.car)) return;
   player.enterVehicle(found.car);
   follow.setMode('car');
@@ -539,9 +732,27 @@ function onKeyDown(event) {
     case 'KeyR':
       reloadWeapon();
       break;
+    case 'KeyM':
+    case 'Tab':
+      event.preventDefault();
+      togglePhone();
+      break;
+    case 'Digit1':
+    case 'Digit2':
+    case 'Digit3': {
+      const row = Number(event.code.slice(5));
+      economy.buyKey(row);
+      break;
+    }
     default:
       break;
   }
+}
+
+/** M or Tab: Mama Rosa's phone. While it is open the world still runs behind it. */
+function togglePhone() {
+  if (state !== STATE_PLAYING) return;
+  missions.togglePhone();
 }
 
 function onKeyUp(event) {
@@ -698,15 +909,15 @@ function simulate(dt) {
       lastWantedSeen = wanted;
       hud.setWanted(wanted, wanted > 0 ? 1.2 : 0);
     }
-    if (combat.state.ammo !== lastHudAmmo || combat.reloading) {
-      lastHudAmmo = combat.state.ammo;
-      hud.setAmmo(combat.state.ammo, combat.state.reserve, combat.reloading);
+    if (combat.ammo !== lastHudAmmo || combat.reloading) {
+      lastHudAmmo = combat.ammo;
+      hud.setAmmo(combat.ammo, combat.reserveAmmo, combat.reloading);
     }
     hud.setHealth(combat.health);
 
     // The enter prompt: only on foot, only near a car that is not already being driven.
     if (!driving) {
-      const found = vehicles.nearest(player.position, vehicles.candidatesFrom(traffic.cars), 3.8);
+      const found = vehicles.nearest(player.position, enterableCars(), 3.8);
       nearbyCar = found ? found.car : null;
       if (nearbyCar) hud.setPrompt('E', `Enter ${nearbyCar.spec.label.toLowerCase()}`);
       else hud.setPrompt(null);
@@ -718,7 +929,41 @@ function simulate(dt) {
     hud.setDriving(driving, vehicles.active ? vehicles.active.speed : 0,
       vehicles.active ? vehicles.active.spec.maxSpeed : 30,
       vehicles.active ? vehicles.active.spec.label.toUpperCase() : '');
+
+    // The story, the shops, the clock and the save all read the same frame: the job first, so
+    // its marker and objective are current, then the pads under the player, then the map.
+    missions.update(dt, elapsed);
+    economy.update(dt, player.position, elapsed);
+    progression.tick(dt, driving ? vehicles.active.speed : 0);
+    autosave.tick(dt);
+
+    const blips = [...missions.blips(), ...economy.blips()];
+    const signature = blips.map((blip) => `${blip.x.toFixed(0)},${blip.z.toFixed(0)},${blip.kind}`).join('|');
+    if (signature !== lastBlipSignature) {
+      lastBlipSignature = signature;
+      hud.setBlips(blips, player.position.x, player.position.z);
+    } else {
+      hud.setBlips(blips, player.position.x, player.position.z);
+    }
   }
+}
+
+/** A shop's ammo pack: pistol rounds, or the SMG's once it is owned. */
+function addAmmo(rounds, kind = null) {
+  combat.addAmmo(rounds, kind);
+  lastHudAmmo = -1;
+}
+
+/** The spray booth: repaints the car the player is driving, on every mesh that shares it. */
+function repaintCar(car, color) {
+  if (!car) return;
+  car.color = color;
+  car.group.traverse((child) => {
+    if (child.isMesh && child.material && child.material.color && !child.material.vertexColors) {
+      child.material = child.material.clone();
+      child.material.color.set(color);
+    }
+  });
 }
 
 // Everything is ready: drop the loading card on the first rendered frame and open the title.
@@ -771,7 +1016,7 @@ window.__sunbay = {
   // Debug hooks for the smoke test: teleport, claim the nearest car, and drive it directly.
   enterCarAt(x, z) {
     player.reset(x, z, player.heading);
-    const found = vehicles.nearest(player.position, vehicles.candidatesFrom(traffic.cars), 3.8);
+    const found = vehicles.nearest(player.position, enterableCars(), 3.8);
     if (!found) return null;
     toggleVehicle();
     return vehicles.active ? vehicles.active.id : null;
@@ -783,14 +1028,53 @@ window.__sunbay = {
   effects,
   screens,
   hud,
+  missions,
+  economy,
+  progression,
+  autosave,
+  save: {
+    load: () => {
+      const data = loadSave();
+      if (!data) return null;
+      applySaveState(data);
+      return data;
+    },
+    write: () => writeSave(collectSaveState()),
+    clear: () => clearSave(),
+    peek: () => loadSave(),
+    has: () => hasSave(),
+  },
+  /** The story entry points the smoke test drives. */
+  mission: {
+    start: (id) => missions.start(id),
+    complete: () => missions.forceComplete(),
+    skip: () => missions.skipStage(),
+    abandon: () => missions.abandon(),
+    get objective() {
+      return missions.objective;
+    },
+    get done() {
+      return missions.done;
+    },
+    get active() {
+      return missions.active;
+    },
+    get marker() {
+      return missions.marker;
+    },
+  },
+  /** Buys a shop row by its id, straight through the shop's own path. */
+  buy: (id, shop) => economy.buy(id, shop ? { shop } : {}),
+  saveNow: (reason) => autosave.saveNow(reason),
   get money() {
-    return money;
+    return economy.money;
   },
   get respawnRemaining() {
     return respawnTimer;
   },
   /** The list combat.js tests its bullet rays against. */
-  cars: () => [...traffic.cars, ...vehicles.cars, ...(vehicles.active ? [vehicles.active] : [])],
+  cars: () => [...traffic.cars, ...vehicles.cars, ...missionCars, ...garageCars,
+    ...(vehicles.active ? [vehicles.active] : [])],
   /** Stands the body somewhere and lets the world settle, for the smoke test. */
   teleport(x, z, heading = player.heading) {
     if (vehicles.active) leaveCar();
@@ -809,6 +1093,8 @@ window.__sunbay = {
     reload: () => combat.reload(),
     givePistol: () => combat.givePistol(),
     setAmmo: (ammo, reserve) => combat.setAmmo(ammo, reserve),
+    giveSmg: () => combat.giveSmg(),
+    addAmmo: (rounds) => addAmmo(rounds),
     setHealth: (value) => {
       combat.state.health = Math.max(0, Math.min(100, value));
       hud.setHealth(combat.state.health);

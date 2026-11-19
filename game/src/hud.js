@@ -1,17 +1,49 @@
 // The HUD, built as DOM over the canvas: a money counter and a five-slot wanted meter at the
 // top right (the browser's own menu lives top left, so that corner stays clear), a health bar
-// and the minimap frame at the bottom left, an ammo counter by the health, and a mission line
+// and the minimap at the bottom left, an ammo counter by the health, and a mission line
 // along the bottom. Numbers are written only when they change, so a steady frame touches no
 // DOM. The wanted stars pulse while a crime is fresh, the screen takes a red vignette as the
 // body is hurt, and the full-screen BUSTED/WASTED cards live in screens.js. All styles are
 // inline in the elements; no external font or sheet is loaded.
 //
-// The minimap is a placeholder frame in this milestone: the north marker, a live player dot
-// and two district pins show where the real map will be drawn.
+// The minimap is north-up around the player: the live player dot at its centre, and blips
+// for the current mission objective, Mama Rosa's booth and the three shops, each clamped to
+// the map's rim when it is out of range. The mission banner (start/complete/fail) and the
+// money-change figure are also DOM here, because this is the one module that owns the HUD.
 
 const CSS = {
   panel: 'position:absolute;color:#fff4e2;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;',
 };
+
+/** How far the minimap sees, in metres: the radius of its inner square. */
+const MAP_RANGE = 88;
+
+const HUD_STYLE_ID = 'sunbay-hud-keyframes';
+
+/** The keyframes for the rising money figure; injected once, never an external sheet. */
+function ensureKeyframes() {
+  if (document.getElementById(HUD_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = HUD_STYLE_ID;
+  style.textContent = `
+    @keyframes sunbay-money-rise {
+      0% { opacity: 0; transform: translateY(6px) scale(0.92); }
+      18% { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(-26px) scale(1); }
+    }
+    @keyframes sunbay-banner-in {
+      0% { opacity: 0; transform: translateX(-50%) translateY(10px) scale(0.97); }
+      12% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+      82% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(1); }
+    }
+    @keyframes sunbay-banner-line {
+      0% { width: 0%; }
+      100% { width: 100%; }
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 export function createHud(root) {
   root.innerHTML = '';
@@ -19,10 +51,15 @@ export function createHud(root) {
   const moneyBox = document.createElement('div');
   moneyBox.style.cssText = `${CSS.panel} top:16px; right:22px; text-align:right; text-shadow:0 2px 8px rgba(0,0,0,0.55);`;
   moneyBox.innerHTML = `
-    <div style="font-size:26px;font-weight:800;letter-spacing:0.02em;color:#d9ffc0;line-height:1.05">$0</div>
+    <div style="position:relative">
+      <div data-money style="font-size:26px;font-weight:800;letter-spacing:0.02em;color:#d9ffc0;line-height:1.05">$0</div>
+      <div data-money-delta style="position:absolute;right:0;top:100%;font-size:13px;font-weight:800;
+          letter-spacing:0.04em;opacity:0;white-space:nowrap"></div>
+    </div>
     <div style="font-size:10px;letter-spacing:0.3em;color:rgba(255,244,226,0.72);margin-top:2px">SUNBAY BANK</div>
   `;
-  const moneyValue = moneyBox.firstElementChild;
+  const moneyValue = moneyBox.querySelector('[data-money]');
+  const moneyDelta = moneyBox.querySelector('[data-money-delta]');
 
   const wantedBox = document.createElement('div');
   wantedBox.style.cssText = `${CSS.panel} top:64px; right:22px; display:flex; gap:5px; align-items:center;`;
@@ -84,24 +121,87 @@ export function createHud(root) {
         background:linear-gradient(160deg,rgba(17,42,55,0.85),rgba(9,20,27,0.9));
         box-shadow:0 8px 22px rgba(0,0,0,0.35);overflow:hidden">
       <div style="position:absolute;inset:11px;border:1px dashed rgba(255,244,226,0.16);border-radius:6px"></div>
+      <div data-blips style="position:absolute;inset:11px;border-radius:6px;overflow:hidden"></div>
       <div data-map-dot style="position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;
-          border-radius:50%;background:#ffe0a8;box-shadow:0 0 0 3px rgba(255,224,168,0.22)"></div>
-      <div data-pin-a style="position:absolute;left:66%;top:38%;width:6px;height:6px;margin:-3px;
-          background:#ff8a63;transform:rotate(45deg)"></div>
-      <div data-pin-b style="position:absolute;left:38%;top:62%;width:6px;height:6px;margin:-3px;
-          background:#64d3ff;transform:rotate(45deg)"></div>
+          border-radius:50%;background:#ffe0a8;box-shadow:0 0 0 3px rgba(255,224,168,0.22);z-index:2"></div>
       <div style="position:absolute;left:50%;top:6px;transform:translateX(-50%);font-size:9px;
           letter-spacing:0.22em;color:rgba(255,244,226,0.62)">N</div>
       <div style="position:absolute;left:8px;bottom:6px;font-size:9px;letter-spacing:0.18em;
           color:rgba(255,244,226,0.55)">SUNBAY</div>
     </div>
   `;
+  const blipLayer = mapBox.querySelector('[data-blips]');
+  const mapDot = mapBox.querySelector('[data-map-dot]');
+  // One pooled node per blip, re-shown each time the list changes; the map keeps no model.
+  const blipNodes = [];
+
+  /** Sets the blips drawn on the minimap; each { x, z, color, kind, label? }. */
+  function setBlips(blips, originX, originZ) {
+    const list = blips ?? [];
+    while (blipNodes.length < list.length) {
+      const node = document.createElement('div');
+      node.style.cssText = 'position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;' +
+        'border-radius:50%;box-shadow:0 0 0 2px rgba(0,0,0,0.35)';
+      blipLayer.appendChild(node);
+      blipNodes.push(node);
+    }
+    blipNodes.forEach((node, index) => {
+      const blip = list[index];
+      if (!blip) {
+        node.style.display = 'none';
+        return;
+      }
+      const dx = blip.x - originX;
+      const dz = blip.z - originZ;
+      const distance = Math.hypot(dx, dz);
+      const scale = Math.min(1, MAP_RANGE / Math.max(0.001, distance));
+      const left = 50 + (dx / MAP_RANGE) * 50 * scale;
+      const top = 50 + (dz / MAP_RANGE) * 50 * scale;
+      node.style.display = 'block';
+      node.style.left = `${Math.max(2, Math.min(98, left))}%`;
+      node.style.top = `${Math.max(2, Math.min(98, top))}%`;
+      node.style.background = blip.color ?? '#ffd05e';
+      const objective = blip.kind === 'objective';
+      node.style.width = objective ? '9px' : '6px';
+      node.style.height = objective ? '9px' : '6px';
+      node.style.margin = objective ? '-4.5px 0 0 -4.5px' : '-3px 0 0 -3px';
+      node.style.borderRadius = blip.kind === 'shop' ? '1px' : '50%';
+      node.style.transform = blip.kind === 'shop' ? 'rotate(45deg)' : 'none';
+      node.style.opacity = distance > MAP_RANGE ? '0.75' : '1';
+    });
+  }
 
   const objective = document.createElement('div');
-  objective.style.cssText = `${CSS.panel} left:50%; bottom:26px; transform:translateX(-50%); max-width:min(720px, 68vw);
-      font-size:13px; letter-spacing:0.06em; text-align:center; color:rgba(255,244,226,0.86);
-      text-shadow:0 2px 8px rgba(0,0,0,0.7);`;
+  objective.style.cssText = `${CSS.panel} left:50%; bottom:82px; transform:translateX(-50%);
+      max-width:min(640px, 48vw); font-size:clamp(11px,1.05vw,13px); letter-spacing:0.06em;
+      text-align:center; color:rgba(255,244,226,0.86); line-height:1.4;
+      text-shadow:0 2px 8px rgba(0,0,0,0.7), 0 0 14px rgba(0,0,0,0.5);`;
   objective.textContent = '';
+  objective.dataset.objective = '';
+
+  // The mission banner: a card that slides in at the top centre for a start, a completion or
+  // a failure, holds for four seconds and fades. Only one is shown at a time.
+  const banner = document.createElement('div');
+  banner.style.cssText = `${CSS.panel} left:50%; top:16px; transform:translateX(-50%); text-align:center;
+      width:min(520px, 44vw); min-width:240px; padding:10px 18px 11px; border-radius:7px;
+      border:1px solid rgba(255,244,226,0.24); background:linear-gradient(165deg,rgba(12,30,40,0.94),rgba(6,16,22,0.95));
+      box-shadow:0 16px 38px rgba(0,0,0,0.45); display:none; opacity:0;`;
+  banner.dataset.banner = '';
+  banner.innerHTML = `
+    <div data-banner-kicker style="font-size:8px;letter-spacing:0.32em;color:#ffcf92"></div>
+    <div data-banner-title style="margin-top:4px;font-size:clamp(17px,2vw,24px);font-weight:900;letter-spacing:0.01em;line-height:1.08"></div>
+    <div data-banner-sub style="margin-top:5px;font-size:10px;line-height:1.45;color:rgba(255,244,226,0.72)"></div>
+    <div data-banner-reward style="margin-top:5px;font-size:15px;font-weight:800;color:#d9ffc0;display:none"></div>
+    <div data-banner-note style="margin-top:4px;font-size:8px;letter-spacing:0.18em;color:#ffd9a0;display:none"></div>
+    <div data-banner-line style="position:absolute;left:0;bottom:0;height:2px;background:#ffcf92;width:0%"></div>
+  `;
+  const bannerKicker = banner.querySelector('[data-banner-kicker]');
+  const bannerTitle = banner.querySelector('[data-banner-title]');
+  const bannerSub = banner.querySelector('[data-banner-sub]');
+  const bannerReward = banner.querySelector('[data-banner-reward]');
+  const bannerNote = banner.querySelector('[data-banner-note]');
+  const bannerLine = banner.querySelector('[data-banner-line]');
+  banner.style.overflow = 'hidden';
 
   const controlsHint = document.createElement('div');
   controlsHint.style.cssText = `${CSS.panel} right:22px; bottom:22px; font-size:10px; letter-spacing:0.16em;
@@ -136,8 +236,8 @@ export function createHud(root) {
 
   // The interaction prompt, centred above the objective line.
   const prompt = document.createElement('div');
-  prompt.style.cssText = `${CSS.panel} left:50%; bottom:64px; transform:translateX(-50%);
-      display:none; padding:8px 16px; border-radius:6px; border:1px solid rgba(255,244,226,0.26);
+  prompt.style.cssText = `${CSS.panel} left:50%; bottom:46px; transform:translateX(-50%);
+      display:none; padding:7px 14px; border-radius:6px; border:1px solid rgba(255,244,226,0.26);
       background:rgba(9,20,27,0.66); font-size:12px; letter-spacing:0.12em; color:#fff4e2;
       text-shadow:0 1px 6px rgba(0,0,0,0.6); white-space:nowrap;`;
   const promptKey = document.createElement('span');
@@ -146,7 +246,8 @@ export function createHud(root) {
   const promptText = document.createElement('span');
   prompt.append(promptKey, promptText);
 
-  root.append(vignette, mapBox, healthBox, ammoBox, moneyBox, wantedBox, objective, controlsHint, speedBox, prompt);
+  root.append(vignette, mapBox, healthBox, ammoBox, moneyBox, wantedBox, objective, controlsHint,
+    speedBox, prompt, banner);
 
   let lastMoney = null;
   let lastHealth = null;
@@ -160,12 +261,83 @@ export function createHud(root) {
   let lastSpeed = null;
   let lastCarName = null;
   let lastPrompt = null;
+  let moneyTimer = 0;
+  let bannerTimer = 0;
 
   /** Money as a whole-dollar, comma-grouped figure; the counter is fed by the game's economy. */
   function setMoney(amount) {
-    if (amount === lastMoney) return;
-    lastMoney = amount;
-    moneyValue.textContent = `$${amount.toLocaleString('en-US')}`;
+    const value = Math.round(Number(amount) || 0);
+    if (value === lastMoney) return;
+    lastMoney = value;
+    moneyValue.textContent = `$${value.toLocaleString('en-US')}`;
+  }
+
+  /**
+   * The money counter plus a rise-and-fade change figure: green for income, red for a spend,
+   * and a short tint of the total in the same colour.
+   */
+  function showMoneyChange(amount, delta) {
+    setMoney(amount);
+    const change = Math.round(Number(delta) || 0);
+    if (!change) return;
+    ensureKeyframes();
+    const income = change > 0;
+    moneyDelta.textContent = `${income ? '+' : '-'}$${Math.abs(change).toLocaleString('en-US')}`;
+    moneyDelta.style.color = income ? '#9dffb0' : '#ff9a85';
+    moneyDelta.style.animation = 'none';
+    void moneyDelta.offsetWidth;
+    moneyDelta.style.animation = 'sunbay-money-rise 1.5s ease-out forwards';
+    moneyValue.style.color = income ? '#e8ffd6' : '#ffb3a4';
+    moneyTimer = 0.55;
+  }
+
+  /**
+   * The mission card: a start, a completion with its pay, or a failure. `detail` carries
+   * kicker, title, subtitle, reward and note.
+   */
+  function showBanner(kind, detail = {}) {
+    ensureKeyframes();
+    const palette = kind === 'complete'
+      ? { accent: '#9dffb0', kicker: '#9dffb0' }
+      : kind === 'fail'
+        ? { accent: '#ff7a63', kicker: '#ffb08f' }
+        : { accent: '#ffd9a0', kicker: '#ffcf92' };
+    const accent = detail.accent ?? palette.accent;
+    bannerKicker.textContent = detail.kicker ?? '';
+    bannerKicker.style.color = palette.kicker;
+    bannerTitle.textContent = detail.title ?? '';
+    bannerTitle.style.color = accent;
+    bannerTitle.style.textShadow = `0 0 26px ${accent}55`;
+    bannerSub.textContent = detail.subtitle ?? '';
+    bannerSub.style.display = detail.subtitle ? 'block' : 'none';
+    if (detail.reward) {
+      bannerReward.textContent = `+$${Number(detail.reward).toLocaleString('en-US')}`;
+      bannerReward.style.display = 'block';
+    } else {
+      bannerReward.style.display = 'none';
+    }
+    if (detail.note) {
+      bannerNote.textContent = detail.note;
+      bannerNote.style.display = 'block';
+    } else {
+      bannerNote.style.display = 'none';
+    }
+    banner.style.borderColor = `${accent}55`;
+    bannerLine.style.background = accent;
+    banner.style.display = 'block';
+    banner.style.animation = 'none';
+    bannerLine.style.animation = 'none';
+    void banner.offsetWidth;
+    const hold = kind === 'complete' ? 5.2 : 4.2;
+    banner.style.animation = `sunbay-banner-in ${hold}s ease-out forwards`;
+    bannerLine.style.width = '100%';
+    bannerLine.style.animation = `sunbay-banner-line ${hold}s linear forwards`;
+    bannerTimer = hold;
+  }
+
+  function hideBanner() {
+    banner.style.display = 'none';
+    bannerTimer = 0;
   }
 
   /** Health 0..100; the bar turns amber, then red, as it drains. */
@@ -220,6 +392,17 @@ export function createHud(root) {
       damageTimer = Math.max(0, damageTimer - dt);
       if (damageTimer === 0) vignette.style.opacity = '0';
     }
+    if (moneyTimer > 0) {
+      moneyTimer = Math.max(0, moneyTimer - dt);
+      if (moneyTimer === 0) {
+        moneyValue.style.color = '#d9ffc0';
+        moneyDelta.style.animation = 'none';
+      }
+    }
+    if (bannerTimer > 0) {
+      bannerTimer = Math.max(0, bannerTimer - dt);
+      if (bannerTimer === 0) hideBanner();
+    }
   }
 
   /** Ammo: magazine, reserve, and whether a reload is under way. */
@@ -248,12 +431,13 @@ export function createHud(root) {
   /** The current mission line, empty when there is no active objective. */
   function setObjective(text) {
     objective.textContent = text ?? '';
+    objective.dataset.objective = text ?? '';
+    objective.style.color = text ? '#ffe3b0' : 'rgba(255,244,226,0.86)';
   }
 
   /** The minimap's live dot: `bearing` is the player's heading in radians, north is up. */
   function setPlayerBearing(bearing) {
-    const dot = mapBox.querySelector('[data-map-dot]');
-    dot.style.transform = `rotate(${bearing}rad)`;
+    mapDot.style.transform = `rotate(${bearing}rad)`;
   }
 
   /**
@@ -299,6 +483,16 @@ export function createHud(root) {
 
   function hide() {
     root.classList.add('hidden');
+    hideBanner();
+  }
+
+  /** Reveals the banner's DOM (the smoke test checks it), or hides it. */
+  function bannerVisible() {
+    return banner.style.display !== 'none';
+  }
+
+  function bannerText() {
+    return banner.textContent;
   }
 
   setMoney(0);
@@ -311,6 +505,11 @@ export function createHud(root) {
     show,
     hide,
     setMoney,
+    showMoneyChange,
+    showBanner,
+    hideBanner,
+    bannerVisible,
+    bannerText,
     setHealth,
     setWanted,
     setAmmo,
@@ -318,6 +517,7 @@ export function createHud(root) {
     tick,
     setObjective,
     setPlayerBearing,
+    setBlips,
     setDriving,
     setPrompt,
   };
