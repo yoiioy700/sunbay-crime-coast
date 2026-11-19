@@ -6,9 +6,11 @@ const TITLE = 'SUNBAY';
 const STORY = 'Crime Coast';
 
 const CONTROLS = [
-  ['WASD', 'Walk the city'],
+  ['WASD', 'Walk · drive'],
   ['SHIFT', 'Sprint'],
-  ['SPACE', 'Jump'],
+  ['SPACE', 'Jump · handbrake'],
+  ['E', 'Enter · exit a car'],
+  ['H', 'Honk'],
   ['MOUSE', 'Look around'],
   ['WHEEL', 'Camera distance'],
   ['ESC', 'Pause'],
@@ -143,7 +145,7 @@ export function createScreens(root, { onPlay, onResume, onQuit }) {
       'div',
       'margin-top:22px;padding-top:16px;border-top:1px solid rgba(255,244,226,0.12);' +
         'font-size:11px;line-height:1.8;color:rgba(255,244,226,0.55);letter-spacing:0.04em;',
-      'Esc resumes · Shift sprints · Space jumps<br>Mouse looks while the pointer is locked',
+      'Esc resumes · E enters a car · H honks<br>Shift sprints · Space jumps or slides the car',
     ),
   );
   pause.append(pausePanel);

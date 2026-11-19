@@ -225,6 +225,61 @@ export function createPlayer(scene, city) {
     group.rotation.y = heading;
   }
 
+  /** Steps into a car: the body is hidden and frozen until it steps back out. */
+  function enterVehicle(car) {
+    velocity.set(0, 0, 0);
+    vertical = 0;
+    jumpQueued = false;
+    group.visible = false;
+    void car;
+  }
+
+  /** Steps out beside the driver's door; `point` is the world-space door position. */
+  function exitVehicle(car, point) {
+    const doorX = point ? point.x : car.position.x;
+    const doorZ = point ? point.z : car.position.z;
+    const clear = clearSpot(doorX, doorZ);
+    position.set(clear.x, city.groundHeightAt(clear.x, clear.z), clear.z);
+    velocity.set(0, 0, 0);
+    vertical = 0;
+    onGround = true;
+    // Face out of the car, away from its flank.
+    heading = Math.atan2(doorX - car.position.x, doorZ - car.position.z);
+    targetHeading = heading;
+    group.position.copy(position);
+    group.rotation.y = heading;
+    group.visible = true;
+  }
+
+  /** Nudges the exit point out of a wall or the car itself, so nobody steps into geometry. */
+  function clearSpot(x, z) {
+    let spotX = x;
+    let spotZ = z;
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (const collider of city.colliders) {
+        if (
+          spotX > collider.minX - RADIUS &&
+          spotX < collider.maxX + RADIUS &&
+          spotZ > collider.minZ - RADIUS &&
+          spotZ < collider.maxZ + RADIUS
+        ) {
+          const left = spotX - (collider.minX - RADIUS);
+          const right = (collider.maxX + RADIUS) - spotX;
+          const back = spotZ - (collider.minZ - RADIUS);
+          const front = (collider.maxZ + RADIUS) - spotZ;
+          const smallest = Math.min(left, right, back, front);
+          if (smallest === left) spotX = collider.minX - RADIUS;
+          else if (smallest === right) spotX = collider.maxX + RADIUS;
+          else if (smallest === back) spotZ = collider.minZ - RADIUS;
+          else spotZ = collider.maxZ + RADIUS;
+        }
+      }
+    }
+    spotX = Math.min(city.bounds.maxX, Math.max(city.bounds.minX, spotX));
+    spotZ = Math.min(city.bounds.maxZ, Math.max(city.bounds.minZ, spotZ));
+    return { x: spotX, z: spotZ };
+  }
+
   return {
     group,
     position,
@@ -237,6 +292,8 @@ export function createPlayer(scene, city) {
     },
     update,
     jump,
+    enterVehicle,
+    exitVehicle,
     /** Places the body (used when the run starts, so it never spawns mid-air). */
     reset(x, z, headingRadians) {
       position.set(x, city.groundHeightAt(x, z), z);

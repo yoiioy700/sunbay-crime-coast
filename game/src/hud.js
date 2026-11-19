@@ -84,13 +84,54 @@ export function createHud(root) {
   const controlsHint = document.createElement('div');
   controlsHint.style.cssText = `${CSS.panel} right:22px; bottom:22px; font-size:10px; letter-spacing:0.16em;
       color:rgba(255,244,226,0.5); text-align:right; line-height:1.7`;
-  controlsHint.innerHTML = 'WASD MOVE · SHIFT SPRINT · SPACE JUMP<br>MOUSE LOOK · WHEEL ZOOM · ESC PAUSE';
+  controlsHint.innerHTML = 'WASD MOVE · SHIFT SPRINT · SPACE JUMP · E ENTER CAR<br>MOUSE LOOK · WHEEL ZOOM · ESC PAUSE';
 
-  root.append(mapBox, healthBox, moneyBox, wantedBox, objective, controlsHint);
+  // The speedometer: a round gauge bottom right, hidden on foot. The needle sweeps a quarter
+  // turn either side of straight up, so 0 is at -120° and the top speed at +120°.
+  const speedBox = document.createElement('div');
+  speedBox.style.cssText = `${CSS.panel} right:22px; bottom:60px; width:148px; height:148px; display:none;`;
+  speedBox.innerHTML = `
+    <div style="position:absolute;inset:0;border-radius:50%;border:1px solid rgba(255,244,226,0.34);
+        background:radial-gradient(circle at 50% 55%,rgba(10,26,35,0.9),rgba(7,18,25,0.96));
+        box-shadow:0 10px 26px rgba(0,0,0,0.4), inset 0 0 26px rgba(120,190,215,0.14)"></div>
+    <div style="position:absolute;left:50%;top:10px;transform:translateX(-50%);font-size:8px;
+        letter-spacing:0.3em;color:rgba(255,244,226,0.6)">SPEED</div>
+    <div data-needle style="position:absolute;left:50%;top:50%;width:3px;height:52px;margin-left:-1.5px;
+        transform-origin:50% 100%;background:linear-gradient(180deg,#ffcf92,rgba(255,207,146,0.25));
+        transform:translateY(-100%) rotate(-120deg);border-radius:2px"></div>
+    <div style="position:absolute;left:50%;top:50%;width:12px;height:12px;margin:-6px;border-radius:50%;
+        background:#ffcf92;box-shadow:0 0 0 3px rgba(255,207,146,0.2)"></div>
+    <div data-speed style="position:absolute;left:0;right:0;bottom:20px;text-align:center;
+        font-size:30px;font-weight:800;color:#fff4e2;line-height:1">0</div>
+    <div style="position:absolute;left:0;right:0;bottom:8px;text-align:center;font-size:8px;
+        letter-spacing:0.28em;color:rgba(255,244,226,0.55)">KM/H</div>
+    <div data-car-name style="position:absolute;left:0;right:0;top:24px;text-align:center;font-size:8px;
+        letter-spacing:0.22em;color:rgba(255,207,146,0.85)">SEDAN</div>
+  `;
+  const needle = speedBox.querySelector('[data-needle]');
+  const speedValue = speedBox.querySelector('[data-speed]');
+  const carName = speedBox.querySelector('[data-car-name]');
+
+  // The interaction prompt, centred above the objective line.
+  const prompt = document.createElement('div');
+  prompt.style.cssText = `${CSS.panel} left:50%; bottom:64px; transform:translateX(-50%);
+      display:none; padding:8px 16px; border-radius:6px; border:1px solid rgba(255,244,226,0.26);
+      background:rgba(9,20,27,0.66); font-size:12px; letter-spacing:0.12em; color:#fff4e2;
+      text-shadow:0 1px 6px rgba(0,0,0,0.6); white-space:nowrap;`;
+  const promptKey = document.createElement('span');
+  promptKey.style.cssText = 'display:inline-block;margin-right:9px;padding:2px 7px;border-radius:4px;' +
+    'background:#ffcf92;color:#20160c;font-weight:800;font-size:11px;letter-spacing:0.08em';
+  const promptText = document.createElement('span');
+  prompt.append(promptKey, promptText);
+
+  root.append(mapBox, healthBox, moneyBox, wantedBox, objective, controlsHint, speedBox, prompt);
 
   let lastMoney = null;
   let lastHealth = null;
   let lastWanted = null;
+  let lastSpeed = null;
+  let lastCarName = null;
+  let lastPrompt = null;
 
   /** Money as a whole-dollar, comma-grouped figure; the counter is fed by the game's economy. */
   function setMoney(amount) {
@@ -138,6 +179,43 @@ export function createHud(root) {
     dot.style.transform = `rotate(${bearing}rad)`;
   }
 
+  /**
+   * The speedometer, shown only while driving. `speed` is m/s; `label` names the car; the
+   * gauge is calibrated to `maxSpeed` so a fast car pins the needle further round.
+   */
+  function setDriving(active, speed = 0, maxSpeed = 30, label = '') {
+    speedBox.style.display = active ? 'block' : 'none';
+    if (!active) {
+      lastSpeed = null;
+      return;
+    }
+    const kmh = Math.round(speed * 3.6);
+    if (kmh !== lastSpeed) {
+      lastSpeed = kmh;
+      speedValue.textContent = String(kmh);
+      const ratio = Math.min(1, Math.max(0, speed / Math.max(1, maxSpeed)));
+      needle.style.transform = `translateY(-100%) rotate(${-120 + ratio * 240}deg)`;
+    }
+    if (label !== lastCarName) {
+      lastCarName = label;
+      carName.textContent = label;
+    }
+  }
+
+  /** The "E — enter vehicle" style prompt; pass null to hide it. */
+  function setPrompt(key, text) {
+    const signature = key ? `${key}\u0000${text}` : null;
+    if (signature === lastPrompt) return;
+    lastPrompt = signature;
+    if (!signature) {
+      prompt.style.display = 'none';
+      return;
+    }
+    promptKey.textContent = key;
+    promptText.textContent = text;
+    prompt.style.display = 'block';
+  }
+
   function show() {
     root.classList.remove('hidden');
   }
@@ -159,5 +237,7 @@ export function createHud(root) {
     setWanted,
     setObjective,
     setPlayerBearing,
+    setDriving,
+    setPrompt,
   };
 }
