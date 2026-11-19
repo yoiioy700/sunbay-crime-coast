@@ -1,134 +1,291 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
+// Boot and the one loop. The world is built once (city, player, camera rig, HUD, screens),
+// then requestAnimationFrame runs with a clamped delta so a stall never teleports the player
+// through a wall. Three states: menu (the title card over a slowly orbiting shot of the city),
+// playing (pointer locked, body driven by the keys) and paused (the pause menu over a still).
 //
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// Nothing here fetches anything: three.js comes from the import map, every other module is a
+// file beside this one.
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+import * as THREE from 'three';
+import { createCity } from './city.js';
+import { createFollowCamera } from './camera.js';
+import { createHud } from './hud.js';
+import { createPlayer } from './player.js';
+import { createScreens } from './screens.js';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+export const STATE_MENU = 'menu';
+export const STATE_PLAYING = 'playing';
+export const STATE_PAUSED = 'paused';
+
+/** The longest step the simulation takes; a longer stall is dropped, never replayed. */
+const MAX_STEP = 0.05;
 
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const hudRoot = document.getElementById('hud');
+const screensRoot = document.getElementById('screens');
+const boot = document.getElementById('boot');
 
-function readBest() {
+/**
+ * A machine without a real GPU (a software rasteriser, as in a headless test) cannot pay for
+ * a shadow map and a high pixel ratio. Ask the driver who it is; on a GPU, render at full
+ * quality, otherwise drop shadows and resolution until the frame fits. Nothing else changes.
+ */
+function detectSoftwareRenderer() {
   try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+    const probe = document.createElement('canvas').getContext('webgl2')
+      ?? document.createElement('canvas').getContext('webgl');
+    if (!probe) return true;
+    const info = probe.getExtension('WEBGL_debug_renderer_info');
+    const name = String(info ? probe.getParameter(info.UNMASKED_RENDERER_WEBGL) : probe.getParameter(probe.RENDERER));
+    probe.getExtension('WEBGL_lose_context')?.loseContext();
+    return /swiftshader|llvmpipe|software|swrast|basic render/i.test(name);
   } catch {
-    return 0;
+    return false;
   }
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
+const SOFTWARE_RENDERER = detectSoftwareRenderer();
+const PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, SOFTWARE_RENDERER ? 0.75 : 2);
+
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: !SOFTWARE_RENDERER,
+  powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(PIXEL_RATIO);
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = !SOFTWARE_RENDERER;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 900);
+
+const city = createCity(scene, 0x51b0a7, { shadows: !SOFTWARE_RENDERER });
+const player = createPlayer(scene, city);
+const follow = createFollowCamera(camera, canvas);
+const hud = createHud(hudRoot);
+const screens = createScreens(screensRoot, { onPlay: startRun, onResume: resumeRun, onQuit: quitToTitle });
+
+const keys = { forward: 0, back: 0, left: 0, right: 0, sprint: false };
+let state = STATE_MENU;
+let elapsed = 0;
+let last = performance.now();
+
+const SUN_OFFSET = new THREE.Vector3(115, 155, 80);
+
+/** Puts the sun's shadow frustum on the player, so the 240 m box is spent where it is seen. */
+function followSun() {
+  city.sun.position.copy(player.position).add(SUN_OFFSET);
+  city.sun.target.position.set(player.position.x, 0, player.position.z);
+  city.sun.target.updateMatrixWorld();
+}
+
+/** Frames the body and lets the title card orbit around it. */
+function enterMenu() {
+  state = STATE_MENU;
+  hud.hide();
+  screens.showTitle();
+  follow.snap(player.position);
+}
+
+function startRun() {
+  state = STATE_PLAYING;
+  elapsed = 0;
+  resetKeys();
+  screens.hideAll();
+  hud.show();
+  hud.setObjective('');
+  follow.snap(player.position);
+  requestPointerLock();
+}
+
+function resumeRun() {
+  state = STATE_PLAYING;
+  resetKeys();
+  screens.hidePause();
+  hud.show();
+  requestPointerLock();
+}
+
+function pauseRun() {
+  if (state !== STATE_PLAYING) return;
+  state = STATE_PAUSED;
+  resetKeys();
+  screens.showPause();
+}
+
+function quitToTitle() {
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  player.reset(city.spawn.x, city.spawn.z, city.spawn.heading);
+  enterMenu();
+}
+
+function togglePause() {
+  if (state === STATE_PLAYING) {
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+    pauseRun();
+  } else if (state === STATE_PAUSED) {
+    resumeRun();
   }
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
+/** Pointer lock is a convenience, never a gate: if the browser refuses, the keys still drive. */
+function requestPointerLock() {
+  const request = canvas.requestPointerLock?.();
+  if (request && typeof request.catch === 'function') request.catch(() => {});
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
+function resetKeys() {
+  keys.forward = 0;
+  keys.back = 0;
+  keys.left = 0;
+  keys.right = 0;
+  keys.sprint = false;
+}
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
+function onKeyDown(event) {
+  if (event.code === 'Escape') {
+    event.preventDefault();
+    togglePause();
+    return;
+  }
+  if (state !== STATE_PLAYING) return;
+  switch (event.code) {
+    case 'KeyW':
+    case 'ArrowUp':
+      keys.forward = 1;
+      break;
+    case 'KeyS':
+    case 'ArrowDown':
+      keys.back = 1;
+      break;
+    case 'KeyA':
+    case 'ArrowLeft':
+      keys.left = 1;
+      break;
+    case 'KeyD':
+    case 'ArrowRight':
+      keys.right = 1;
+      break;
+    case 'ShiftLeft':
+    case 'ShiftRight':
+      keys.sprint = true;
+      break;
+    case 'Space':
+      event.preventDefault();
+      player.jump();
+      break;
+    default:
+      break;
+  }
+}
+
+function onKeyUp(event) {
+  switch (event.code) {
+    case 'KeyW':
+    case 'ArrowUp':
+      keys.forward = 0;
+      break;
+    case 'KeyS':
+    case 'ArrowDown':
+      keys.back = 0;
+      break;
+    case 'KeyA':
+    case 'ArrowLeft':
+      keys.left = 0;
+      break;
+    case 'KeyD':
+    case 'ArrowRight':
+      keys.right = 0;
+      break;
+    case 'ShiftLeft':
+    case 'ShiftRight':
+      keys.sprint = false;
+      break;
+    default:
+      break;
+  }
+}
+
+window.addEventListener('keydown', onKeyDown);
+window.addEventListener('keyup', onKeyUp);
+window.addEventListener('blur', () => {
+  resetKeys();
+  if (state === STATE_PLAYING) pauseRun();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  // Losing the pointer while playing is the player's Esc: show the menu, not a lost cursor
+  // driving the camera. A refused lock never fires a change, so the game simply plays on.
+  if (state === STATE_PLAYING && document.pointerLockElement !== canvas) pauseRun();
+});
+
+// The title's PLAY button asks for pointer lock after the click; a browser that refuses it
+// raises this event, and the run continues without mouse look.
+document.addEventListener('pointerlockerror', () => {});
+
+function onResize() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  camera.aspect = width / Math.max(1, height);
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(width, height, false);
+}
+
+window.addEventListener('resize', onResize);
+
+const controls = { forward: 0, strafe: 0, sprint: false };
+
+function frame(now) {
+  const dt = Math.min(MAX_STEP, Math.max(0, (now - last) / 1000));
+  last = now;
+  elapsed += dt;
+
+  if (state === STATE_PLAYING) {
+    controls.forward = keys.forward - keys.back;
+    controls.strafe = keys.right - keys.left;
+    controls.sprint = keys.sprint;
+    player.update(dt, follow.state.yaw, controls);
+    follow.update(dt, player.position);
+    hud.setPlayerBearing(player.heading);
+  } else {
+    if (state === STATE_MENU) follow.orbit(dt * 0.085);
+    follow.update(dt, player.position);
   }
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
+  followSun();
+  renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+// Everything is ready: drop the loading card on the first rendered frame and open the title.
+enterMenu();
+followSun();
+renderer.render(scene, camera);
+boot.classList.add('done');
+setTimeout(() => boot.remove(), 500);
+requestAnimationFrame((now) => {
+  last = now;
+  frame(now);
+});
+
+// A small handle for diagnostics and the smoke test; it holds no game logic.
+window.__sunbay = {
+  get state() {
+    return state;
+  },
+  player,
+  camera,
+  follow,
+  renderer,
+  city,
+  scene,
+  get drawCalls() {
+    return renderer.info.render.calls;
+  },
+  start: startRun,
+};
