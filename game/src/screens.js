@@ -1,6 +1,8 @@
-// The two screens over the world: the title card, and the pause menu Esc opens. Both are DOM,
-// so the type is crisp at any window size and nothing is rasterised into the canvas. The title
-// names the city, what the game is, the controls, and the one thing that starts a run: PLAY.
+// The screens over the world: the title card, the pause menu Esc opens, and the two outcome
+// cards an ended run shows, BUSTED in police blue after an arrest and WASTED in red after the
+// body runs out of health. Both are DOM, so the type is crisp at any window size and nothing is
+// rasterised into the canvas. The outcome card names what it cost and counts down the respawn,
+// which main.js runs a few seconds later.
 
 const TITLE = 'SUNBAY';
 const STORY = 'Crime Coast';
@@ -150,7 +152,44 @@ export function createScreens(root, { onPlay, onResume, onQuit }) {
   );
   pause.append(pausePanel);
 
-  root.append(title, pause);
+  // -- the outcome card (BUSTED / WASTED) ----------------------------------------------------
+  const outcome = el(
+    'section',
+    [
+      'position:absolute;inset:0;display:none;place-items:center;pointer-events:auto;',
+      'font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;color:#fff4e2;',
+      'transition:opacity 0.25s ease;',
+    ].join(''),
+  );
+  const outcomeInner = el('div', 'text-align:center;transform:translateY(-2vh);');
+  const outcomeKicker = el('div', 'font-size:11px;letter-spacing:0.55em;margin-bottom:12px;', 'SUNBAY POLICE DEPARTMENT');
+  const outcomeTitle = el(
+    'h2',
+    'margin:0;font-size:clamp(64px,12vw,150px);line-height:0.9;font-weight:900;letter-spacing:0.03em;' +
+      'text-shadow:0 12px 44px rgba(0,0,0,0.65);',
+    'BUSTED',
+  );
+  const outcomeReason = el('div', 'margin:14px 0 0;font-size:13px;letter-spacing:0.16em;color:rgba(255,244,226,0.75);', '');
+  const outcomeCost = el(
+    'div',
+    'margin:22px auto 0;display:inline-block;padding:10px 22px;border-radius:5px;' +
+      'border:1px solid rgba(255,244,226,0.26);background:rgba(8,18,26,0.66);font-size:13px;letter-spacing:0.16em;',
+    '',
+  );
+  const outcomeCountdown = el(
+    'div',
+    'margin:26px 0 0;font-size:12px;letter-spacing:0.34em;color:rgba(255,244,226,0.6);',
+    'RESPAWNING…',
+  );
+  outcomeInner.append(outcomeKicker, outcomeTitle, outcomeReason, outcomeCost, outcomeCountdown);
+  outcome.append(outcomeInner);
+
+  const OUTCOME_COLORS = {
+    busted: { title: '#8fc2ff', glow: 'rgba(22,54,98,0.72)', kicker: 'SUNBAY POLICE DEPARTMENT' },
+    wasted: { title: '#ff7a63', glow: 'rgba(96,18,12,0.72)', kicker: 'SUNBAY GENERAL HOSPITAL' },
+  };
+
+  root.append(title, pause, outcome);
 
   function showTitle() {
     title.style.display = 'flex';
@@ -169,9 +208,36 @@ export function createScreens(root, { onPlay, onResume, onQuit }) {
     pause.style.display = 'none';
   }
 
+  /** The BUSTED / WASTED card. `kind` is 'busted' or 'wasted'. */
+  function showOutcome(kind, detail = {}) {
+    const palette = OUTCOME_COLORS[kind] ?? OUTCOME_COLORS.busted;
+    outcomeTitle.textContent = kind === 'wasted' ? 'WASTED' : 'BUSTED';
+    outcomeTitle.style.color = palette.title;
+    outcomeTitle.style.textShadow = `0 0 60px ${palette.title}, 0 12px 44px rgba(0,0,0,0.65)`;
+    outcomeKicker.textContent = palette.kicker;
+    outcome.style.background = `radial-gradient(ellipse at 50% 45%, ${palette.glow} 0%, rgba(4,10,15,0.93) 70%)`;
+    outcomeReason.textContent = detail.reason ?? '';
+    outcomeCost.textContent = detail.cost ?? '';
+    outcomeCountdown.textContent = detail.countdown ?? 'RESPAWNING…';
+    outcome.style.display = 'grid';
+    pause.style.display = 'none';
+    title.style.display = 'none';
+  }
+
+  function setOutcomeCountdown(seconds) {
+    outcomeCountdown.textContent = seconds > 0
+      ? `RESPAWNING IN ${Math.ceil(seconds)}`
+      : 'RESPAWNING…';
+  }
+
+  function hideOutcome() {
+    outcome.style.display = 'none';
+  }
+
   function hideAll() {
     title.style.display = 'none';
     pause.style.display = 'none';
+    outcome.style.display = 'none';
   }
 
   return {
@@ -179,9 +245,14 @@ export function createScreens(root, { onPlay, onResume, onQuit }) {
     hideTitle,
     showPause,
     hidePause,
+    showOutcome,
+    setOutcomeCountdown,
+    hideOutcome,
     hideAll,
     isTitleVisible: () => title.style.display !== 'none',
     isPauseVisible: () => pause.style.display !== 'none',
+    isOutcomeVisible: () => outcome.style.display !== 'none',
+    outcomeTitle,
     playButton,
   };
 }

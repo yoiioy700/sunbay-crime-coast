@@ -122,6 +122,11 @@ export function createPedestrians(scene, city, options = {}) {
       blockX: block[0],
       blockZ: block[1],
       alive: true,
+      health: 100,
+      down: 0,
+      flinch: 0,
+      homeX: start.x,
+      homeZ: start.z,
     };
   }
 
@@ -132,11 +137,82 @@ export function createPedestrians(scene, city, options = {}) {
     peds.push(ped);
   }
 
+  /**
+   * Damages one pedestrian and scares the rest: a punch or a bullet lands, the target staggers
+   * back, and the street around it runs. At zero health the body goes down and is revived at
+   * its block after a few seconds, so the crowd never thins out.
+   */
+  function hit(ped, amount = 34, fromX = ped.x, fromZ = ped.z, radius = 16) {
+    if (!ped || ped.down > 0) return false;
+    ped.health = Math.max(0, ped.health - amount);
+    ped.flinch = 0.5;
+    const awayX = ped.x - fromX;
+    const awayZ = ped.z - fromZ;
+    const length = Math.hypot(awayX, awayZ) || 1;
+    ped.scatterX = awayX / length;
+    ped.scatterZ = awayZ / length;
+    ped.scatter = Math.max(ped.scatter, SCATTER_TIME * 0.8);
+    if (ped.health <= 0) {
+      ped.down = 8;
+      ped.scatter = 0;
+    }
+    scatterFrom(ped.x, ped.z, radius);
+    return true;
+  }
+
+  /** The nearest standing pedestrian to a point, within `radius`. */
+  function nearest(point, radius = 2.4) {
+    let best = null;
+    let bestDistance = radius;
+    for (const ped of peds) {
+      if (ped.down > 0) continue;
+      const distance = Math.hypot(ped.x - point.x, ped.z - point.z);
+      if (distance < bestDistance) {
+        best = ped;
+        bestDistance = distance;
+      }
+    }
+    return best ? { ped: best, distance: bestDistance } : null;
+  }
+
+  /** True when the point is inside a standing pedestrian's body, for bullets. */
+  function atPoint(x, z, radius = 0.7) {
+    for (const ped of peds) {
+      if (ped.down > 0) continue;
+      if (Math.hypot(ped.x - x, ped.z - z) < radius) return ped;
+    }
+    return null;
+  }
+
+  /**
+   * A car over a pedestrian: the nearest body inside `radius` is knocked down, everyone else
+   * near the impact scatters. Returns the pedestrian that was hit, or null.
+   */
+  function hitByCar(x, z, radius, speed = 0) {
+    if (speed < 3) return null;
+    let victim = null;
+    let closest = radius;
+    for (const ped of peds) {
+      if (ped.down > 0) continue;
+      const distance = Math.hypot(ped.x - x, ped.z - z);
+      if (distance < closest) {
+        victim = ped;
+        closest = distance;
+      }
+    }
+    if (!victim) return null;
+    victim.health = 0;
+    victim.down = 9;
+    victim.flinch = 0;
+    scatterFrom(victim.x, victim.z, 22);
+    return victim;
+  }
+
   /** Starts a run away from (x, z) for the pedestrians inside the radius. */
   function scatterFrom(x, z, radius) {
     for (const ped of peds) {
       const distance = Math.hypot(ped.x - x, ped.z - z);
-      if (distance > radius) continue;
+      if (distance > radius || ped.down > 0) continue;
       let awayX = ped.x - x;
       let awayZ = ped.z - z;
       const length = Math.hypot(awayX, awayZ);
@@ -171,6 +247,23 @@ export function createPedestrians(scene, city, options = {}) {
   }
 
   function updatePed(ped, dt) {
+    if (ped.flinch > 0) ped.flinch = Math.max(0, ped.flinch - dt);
+    if (ped.down > 0) {
+      // On the ground: lie flat, then get up where the block's circuit can pick them up.
+      ped.down = Math.max(0, ped.down - dt);
+      ped.group.position.set(ped.x, city.groundHeightAt(ped.x, ped.z), ped.z);
+      ped.group.rotation.x = -Math.PI / 2 * Math.min(1, (9 - ped.down) * 3);
+      ped.parts.armLeft.rotation.z = 0.9;
+      ped.parts.armRight.rotation.z = -0.9;
+      if (ped.down === 0) {
+        ped.group.rotation.x = 0;
+        ped.health = 100;
+        ped.x = ped.homeX;
+        ped.z = ped.homeZ;
+        ped.scatter = 0;
+      }
+      return;
+    }
     const scattering = ped.scatter > 0;
     let moveX = 0;
     let moveZ = 0;
@@ -232,6 +325,8 @@ export function createPedestrians(scene, city, options = {}) {
     const ground = city.groundHeightAt(ped.x, ped.z);
     ped.group.position.set(ped.x, ground, ped.z);
     ped.group.rotation.y = ped.heading;
+    // A hit flinch: the body jerks back for half a second.
+    ped.group.rotation.x = ped.flinch > 0 ? -Math.sin(ped.flinch * Math.PI * 2) * 0.22 : 0;
   }
 
   function update(dt, events = []) {
@@ -243,6 +338,10 @@ export function createPedestrians(scene, city, options = {}) {
     peds,
     update,
     scatterFrom,
+    hit,
+    hitByCar,
+    nearest,
+    atPoint,
     reactTo,
     get count() {
       return peds.length;

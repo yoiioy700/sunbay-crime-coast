@@ -458,18 +458,23 @@ export function exitPoint(car) {
  * The player's car ownership: at most one active car, plus any cars previously stolen and
  * left parked. Traffic cars are not rebuilt when stolen; their object is adopted here.
  */
-export function createVehicles(scene, city) {
+export function createVehicles(scene, city, options = {}) {
+  const { onStolen = null } = options;
   const owned = [];
   let active = null;
 
-  /** Adopts a car (traffic or new) as the player's and starts driving it. */
+  /** Adopts a car (traffic or new) as the player's and starts driving it. The first time a
+   *  car is taken it is a theft, and `onStolen` raises the crime with the police. */
   function enter(car) {
     if (!car || active) return false;
+    const firstTheft = !car.playerOwned;
     active = car;
     car.driver = true;
     car.stolen = true;
+    car.playerOwned = true;
     car.ai = null;
     car.speed = 0;
+    if (firstTheft) onStolen?.(car);
     return true;
   }
 

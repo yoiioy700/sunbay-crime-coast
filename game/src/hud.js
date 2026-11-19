@@ -1,8 +1,10 @@
 // The HUD, built as DOM over the canvas: a money counter and a five-slot wanted meter at the
 // top right (the browser's own menu lives top left, so that corner stays clear), a health bar
-// and the minimap frame at the bottom left, and a mission line along the bottom. Numbers are
-// written only when they change, so a steady frame touches no DOM. All styles are inline in
-// the elements; no external font or sheet is loaded.
+// and the minimap frame at the bottom left, an ammo counter by the health, and a mission line
+// along the bottom. Numbers are written only when they change, so a steady frame touches no
+// DOM. The wanted stars pulse while a crime is fresh, the screen takes a red vignette as the
+// body is hurt, and the full-screen BUSTED/WASTED cards live in screens.js. All styles are
+// inline in the elements; no external font or sheet is loaded.
 //
 // The minimap is a placeholder frame in this milestone: the north marker, a live player dot
 // and two district pins show where the real map will be drawn.
@@ -54,6 +56,26 @@ export function createHud(root) {
   `;
   const healthBar = healthBox.querySelector('[data-bar]');
   const healthValue = healthBox.querySelector('[data-hp]');
+
+  // The pistol: magazine, reserve, and a reload line that appears while the swap runs.
+  const ammoBox = document.createElement('div');
+  ammoBox.style.cssText = `${CSS.panel} left:22px; bottom:76px; display:flex; align-items:flex-end; gap:8px;
+      text-shadow:0 2px 6px rgba(0,0,0,0.6)`;
+  ammoBox.innerHTML = `
+    <div data-ammo style="font-size:22px;font-weight:800;color:#ffe0a8;line-height:1">12</div>
+    <div data-reserve style="font-size:11px;color:rgba(255,244,226,0.68);padding-bottom:3px">/ 48</div>
+    <div data-reload style="font-size:9px;letter-spacing:0.2em;color:#ffb36a;padding-bottom:4px;display:none">RELOADING</div>
+    <div style="font-size:9px;letter-spacing:0.24em;color:rgba(255,244,226,0.5);padding-bottom:4px">9MM · R</div>
+  `;
+  const ammoValue = ammoBox.querySelector('[data-ammo]');
+  const reserveValue = ammoBox.querySelector('[data-reserve]');
+  const reloadLabel = ammoBox.querySelector('[data-reload]');
+
+  // The damage vignette: a red edge that flares when the body is hurt and fades away.
+  const vignette = document.createElement('div');
+  vignette.style.cssText = 'position:absolute;inset:0;pointer-events:none;opacity:0;' +
+    'background:radial-gradient(ellipse at 50% 50%, rgba(150,12,8,0) 42%, rgba(150,12,8,0.55) 100%);' +
+    'transition:opacity 0.25s ease';
 
   const mapBox = document.createElement('div');
   mapBox.style.cssText = `${CSS.panel} left:22px; bottom:150px; width:210px; height:210px;`;
@@ -124,11 +146,17 @@ export function createHud(root) {
   const promptText = document.createElement('span');
   prompt.append(promptKey, promptText);
 
-  root.append(mapBox, healthBox, moneyBox, wantedBox, objective, controlsHint, speedBox, prompt);
+  root.append(vignette, mapBox, healthBox, ammoBox, moneyBox, wantedBox, objective, controlsHint, speedBox, prompt);
 
   let lastMoney = null;
   let lastHealth = null;
   let lastWanted = null;
+  let lastAmmo = null;
+  let lastReserve = null;
+  let lastReload = null;
+  let flashUntil = 0;
+  let wantedFlashTimer = 0;
+  let damageTimer = 0;
   let lastSpeed = null;
   let lastCarName = null;
   let lastPrompt = null;
@@ -154,10 +182,11 @@ export function createHud(root) {
         : 'linear-gradient(90deg,#d9553d,#ef7d5e)';
   }
 
-  /** 0..5 filled stars; empty slots stay as faint outlines. */
-  function setWanted(level) {
+  /** 0..5 filled stars; empty slots stay as faint outlines. `flashSeconds` pulses a new crime. */
+  function setWanted(level, flashSeconds = 0) {
     const clamped = Math.max(0, Math.min(5, Math.round(level)));
-    if (clamped === lastWanted) return;
+    if (flashSeconds > 0) flashUntil = Math.max(flashUntil, flashSeconds);
+    if (clamped === lastWanted && flashSeconds <= 0) return;
     lastWanted = clamped;
     stars.forEach((star, index) => {
       const lit = index < clamped;
@@ -166,6 +195,54 @@ export function createHud(root) {
       path.setAttribute('fill', lit ? '#ffd9a0' : '#1b2026');
     });
     wantedLabel.style.color = clamped > 0 ? '#ffd9a0' : 'rgba(255,244,226,0.7)';
+  }
+
+  /** Per-frame flourish: pulses the wanted stars and fades the damage vignette. */
+  function tick(dt) {
+    if (flashUntil > 0) {
+      flashUntil = Math.max(0, flashUntil - dt);
+      wantedFlashTimer += dt;
+      const pulse = 0.45 + 0.55 * Math.abs(Math.sin(wantedFlashTimer * 9));
+      stars.forEach((star, index) => {
+        if (index < lastWanted) {
+          star.style.transform = `scale(${1 + pulse * 0.13})`;
+          star.style.filter = `drop-shadow(0 0 ${4 + pulse * 5}px rgba(255,190,110,0.9))`;
+        }
+      });
+      if (flashUntil === 0) {
+        stars.forEach((star) => {
+          star.style.transform = 'scale(1)';
+          star.style.filter = 'drop-shadow(0 2px 3px rgba(0,0,0,0.5))';
+        });
+      }
+    }
+    if (damageTimer > 0) {
+      damageTimer = Math.max(0, damageTimer - dt);
+      if (damageTimer === 0) vignette.style.opacity = '0';
+    }
+  }
+
+  /** Ammo: magazine, reserve, and whether a reload is under way. */
+  function setAmmo(ammo, reserve = null, reloading = false) {
+    if (ammo !== lastAmmo) {
+      lastAmmo = ammo;
+      ammoValue.textContent = String(ammo);
+      ammoValue.style.color = ammo === 0 ? '#ff7a63' : ammo <= 3 ? '#ffcf92' : '#ffe0a8';
+    }
+    if (reserve !== null && reserve !== lastReserve) {
+      lastReserve = reserve;
+      reserveValue.textContent = `/ ${reserve}`;
+    }
+    if (reloading !== lastReload) {
+      lastReload = reloading;
+      reloadLabel.style.display = reloading ? 'block' : 'none';
+    }
+  }
+
+  /** A red flare at the screen's edge for `seconds`; called with each wound. */
+  function damageFlash(seconds = 0.9, strength = 1) {
+    damageTimer = Math.max(damageTimer, seconds);
+    vignette.style.opacity = String(Math.min(1, 0.45 + strength * 0.5));
   }
 
   /** The current mission line, empty when there is no active objective. */
@@ -227,6 +304,7 @@ export function createHud(root) {
   setMoney(0);
   setHealth(100);
   setWanted(0);
+  setAmmo(12, 48, false);
   setObjective('');
 
   return {
@@ -235,6 +313,9 @@ export function createHud(root) {
     setMoney,
     setHealth,
     setWanted,
+    setAmmo,
+    damageFlash,
+    tick,
     setObjective,
     setPlayerBearing,
     setDriving,
