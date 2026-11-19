@@ -6,17 +6,17 @@
 // body is hurt, and the full-screen BUSTED/WASTED cards live in screens.js. All styles are
 // inline in the elements; no external font or sheet is loaded.
 //
-// The minimap is north-up around the player: the live player dot at its centre, and blips
-// for the current mission objective, Mama Rosa's booth and the three shops, each clamped to
-// the map's rim when it is out of range. The mission banner (start/complete/fail) and the
-// money-change figure are also DOM here, because this is the one module that owns the HUD.
+// The minimap is a real rotated canvas drawn by minimap.js: the streets from the city's own
+// plan turn under a fixed player arrow, police cruisers flash while wanted, the job's marker
+// pulses yellow, shops are green diamonds, and traffic shows as pale dots. Zoom is + and -.
+// The mission banner (start/complete/fail) and the money-change figure are also DOM here,
+// because this is the one module that owns the HUD.
+
+import { createMinimap } from './minimap.js';
 
 const CSS = {
   panel: 'position:absolute;color:#fff4e2;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;',
 };
-
-/** How far the minimap sees, in metres: the radius of its inner square. */
-const MAP_RANGE = 88;
 
 const HUD_STYLE_ID = 'sunbay-hud-keyframes';
 
@@ -114,60 +114,38 @@ export function createHud(root) {
     'background:radial-gradient(ellipse at 50% 50%, rgba(150,12,8,0) 42%, rgba(150,12,8,0.55) 100%);' +
     'transition:opacity 0.25s ease';
 
+  // The minimap: a real canvas, rotated under a fixed arrow by minimap.js. Road geometry and
+  // world blips are drawn there; this module only owns the frame around it and the zoom keys.
   const mapBox = document.createElement('div');
   mapBox.style.cssText = `${CSS.panel} left:22px; bottom:150px; width:210px; height:210px;`;
   mapBox.innerHTML = `
     <div style="position:absolute;inset:0;border-radius:10px;border:1px solid rgba(255,244,226,0.4);
         background:linear-gradient(160deg,rgba(17,42,55,0.85),rgba(9,20,27,0.9));
         box-shadow:0 8px 22px rgba(0,0,0,0.35);overflow:hidden">
-      <div style="position:absolute;inset:11px;border:1px dashed rgba(255,244,226,0.16);border-radius:6px"></div>
-      <div data-blips style="position:absolute;inset:11px;border-radius:6px;overflow:hidden"></div>
-      <div data-map-dot style="position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;
-          border-radius:50%;background:#ffe0a8;box-shadow:0 0 0 3px rgba(255,224,168,0.22);z-index:2"></div>
-      <div style="position:absolute;left:50%;top:6px;transform:translateX(-50%);font-size:9px;
-          letter-spacing:0.22em;color:rgba(255,244,226,0.62)">N</div>
-      <div style="position:absolute;left:8px;bottom:6px;font-size:9px;letter-spacing:0.18em;
-          color:rgba(255,244,226,0.55)">SUNBAY</div>
+      <canvas data-map width="210" height="210"
+        style="position:absolute;inset:0;width:100%;height:100%;border-radius:9px;display:block"></canvas>
+      <div style="position:absolute;right:7px;bottom:5px;font-size:9px;letter-spacing:0.16em;
+          color:rgba(255,244,226,0.55);pointer-events:none">SUNBAY</div>
+      <div style="position:absolute;left:8px;bottom:5px;font-size:8px;letter-spacing:0.14em;
+          color:rgba(255,244,226,0.42);pointer-events:none">+ / − ZOOM</div>
     </div>
   `;
-  const blipLayer = mapBox.querySelector('[data-blips]');
-  const mapDot = mapBox.querySelector('[data-map-dot]');
-  // One pooled node per blip, re-shown each time the list changes; the map keeps no model.
-  const blipNodes = [];
+  const mapCanvas = mapBox.querySelector('[data-map]');
+  const minimap = createMinimap(mapCanvas, { getHeading: () => mapHeading });
+  let mapHeading = 0;
+  // The last frame the HUD drew from: minimap.draw is cheap enough to call each frame, but
+  // it is only called when the game is playing, so the menu's map holds a still.
+  let mapBlips = [];
+  let mapTraffic = [];
+  let mapOrigin = { x: 0, z: 0 };
+  let mapWanted = 0;
+  let mapTime = 0;
 
-  /** Sets the blips drawn on the minimap; each { x, z, color, kind, label? }. */
-  function setBlips(blips, originX, originZ) {
-    const list = blips ?? [];
-    while (blipNodes.length < list.length) {
-      const node = document.createElement('div');
-      node.style.cssText = 'position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;' +
-        'border-radius:50%;box-shadow:0 0 0 2px rgba(0,0,0,0.35)';
-      blipLayer.appendChild(node);
-      blipNodes.push(node);
-    }
-    blipNodes.forEach((node, index) => {
-      const blip = list[index];
-      if (!blip) {
-        node.style.display = 'none';
-        return;
-      }
-      const dx = blip.x - originX;
-      const dz = blip.z - originZ;
-      const distance = Math.hypot(dx, dz);
-      const scale = Math.min(1, MAP_RANGE / Math.max(0.001, distance));
-      const left = 50 + (dx / MAP_RANGE) * 50 * scale;
-      const top = 50 + (dz / MAP_RANGE) * 50 * scale;
-      node.style.display = 'block';
-      node.style.left = `${Math.max(2, Math.min(98, left))}%`;
-      node.style.top = `${Math.max(2, Math.min(98, top))}%`;
-      node.style.background = blip.color ?? '#ffd05e';
-      const objective = blip.kind === 'objective';
-      node.style.width = objective ? '9px' : '6px';
-      node.style.height = objective ? '9px' : '6px';
-      node.style.margin = objective ? '-4.5px 0 0 -4.5px' : '-3px 0 0 -3px';
-      node.style.borderRadius = blip.kind === 'shop' ? '1px' : '50%';
-      node.style.transform = blip.kind === 'shop' ? 'rotate(45deg)' : 'none';
-      node.style.opacity = distance > MAP_RANGE ? '0.75' : '1';
+  /** Repaints the minimap for this frame at the current zoom. */
+  function paintMap() {
+    minimap.draw({
+      x: mapOrigin.x, z: mapOrigin.z, blips: mapBlips, traffic: mapTraffic,
+      wanted: mapWanted, time: mapTime,
     });
   }
 
@@ -435,9 +413,29 @@ export function createHud(root) {
     objective.style.color = text ? '#ffe3b0' : 'rgba(255,244,226,0.86)';
   }
 
-  /** The minimap's live dot: `bearing` is the player's heading in radians, north is up. */
+  /** The minimap's bearing: the player's heading in radians; the map turns under the arrow. */
   function setPlayerBearing(bearing) {
-    mapDot.style.transform = `rotate(${bearing}rad)`;
+    mapHeading = bearing;
+  }
+
+  /**
+   * Sets the minimap's world state for this frame. `blips` are { x, z, kind }; `traffic` are
+   * { x, z } dots; `wanted` is the police level (cruisers flash red/blue above zero).
+   */
+  function setMap(frame = {}) {
+    mapBlips = frame.blips ?? [];
+    mapTraffic = frame.traffic ?? [];
+    mapOrigin = { x: frame.x ?? 0, z: frame.z ?? 0 };
+    mapWanted = frame.wanted ?? 0;
+    mapTime = frame.time ?? 0;
+    paintMap();
+  }
+
+  /** Zooms the minimap in or out one step; returns the new range in metres. */
+  function zoomMap(delta) {
+    const metres = delta > 0 ? minimap.zoomIn() : minimap.zoomOut();
+    paintMap();
+    return metres;
   }
 
   /**
@@ -517,7 +515,9 @@ export function createHud(root) {
     tick,
     setObjective,
     setPlayerBearing,
-    setBlips,
+    setMap,
+    zoomMap,
+    minimap,
     setDriving,
     setPrompt,
   };

@@ -13,9 +13,11 @@
 // file beside this one.
 
 import * as THREE from 'three';
-import { createCity } from './city.js';
+import { createAudio } from './audio.js';
+import { CITY, createCity } from './city.js';
 import { createCombat } from './combat.js';
 import { createEconomy } from './economy.js';
+import { createEffects } from './effects.js';
 import { createFollowCamera } from './camera.js';
 import { createHud } from './hud.js';
 import { createMissions } from './missions.js';
@@ -27,7 +29,8 @@ import { createScreens } from './screens.js';
 import { createTraffic } from './traffic.js';
 import { createVehicles, exitPoint } from './vehicles.js';
 import {
-  NEW_GAME, clearSave, createAutosave, hasSave, loadSave, writeSave,
+  NEW_GAME, clearSave, createAutosave, hasSave, loadSave, loadSettings, writeSave,
+  writeSettings,
 } from './save.js';
 
 export const STATE_MENU = 'menu';
@@ -88,142 +91,10 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 900);
 
-/**
- * The pooled hit effects: muzzle flashes, tracer segments and impact sparks. Every effect is
- * an object made once and re-shown; nothing is allocated per shot, and the pools are small
- * enough that even a firefight costs a handful of draw calls.
- */
-function createEffects(scene) {
-  const muzzleGeometry = new THREE.PlaneGeometry(0.55, 0.55);
-  const sparkGeometry = new THREE.PlaneGeometry(0.16, 0.16);
-  const flashes = [];
-  const sparks = [];
-  const tracers = [];
-
-  for (let index = 0; index < 3; index += 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: '#ffe7a8', transparent: true, opacity: 0, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(muzzleGeometry, material);
-    mesh.visible = false;
-    scene.add(mesh);
-    flashes.push({ mesh, life: 0, max: 0.07 });
-  }
-  for (let index = 0; index < 10; index += 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: '#ffd27a', transparent: true, opacity: 0, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(sparkGeometry, material);
-    mesh.visible = false;
-    scene.add(mesh);
-    sparks.push({ mesh, life: 0, max: 0.2 });
-  }
-  for (let index = 0; index < 8; index += 1) {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-    const material = new THREE.LineBasicMaterial({
-      color: '#ffe6a8', transparent: true, opacity: 0, depthWrite: false,
-    });
-    const line = new THREE.Line(geometry, material);
-    line.visible = false;
-    line.frustumCulled = false;
-    scene.add(line);
-    tracers.push({ line, life: 0, max: 0.1 });
-  }
-
-  let shakeAmount = 0;
-  let cursor = 0;
-
-  function next(pool) {
-    for (const item of pool) if (item.life <= 0) return item;
-    const item = pool[cursor % pool.length];
-    cursor += 1;
-    return item;
-  }
-
-  return {
-    muzzle(position) {
-      const flash = next(flashes);
-      flash.mesh.position.copy(position);
-      flash.mesh.visible = true;
-      flash.mesh.material.opacity = 0.95;
-      flash.mesh.scale.setScalar(0.8 + Math.random() * 0.5);
-      flash.life = flash.max;
-    },
-    tracer(from, to, color = '#ffe6a8') {
-      const tracer = next(tracers);
-      const positions = tracer.line.geometry.attributes.position;
-      positions.setXYZ(0, from.x, from.y, from.z);
-      positions.setXYZ(1, to.x, to.y, to.z);
-      positions.needsUpdate = true;
-      tracer.line.geometry.computeBoundingSphere();
-      tracer.line.material.color.set(color);
-      tracer.line.material.opacity = 0.9;
-      tracer.line.visible = true;
-      tracer.life = tracer.max;
-    },
-    spark(x, y, z, color = '#ffd27a') {
-      const spark = next(sparks);
-      spark.mesh.position.set(x, y, z);
-      spark.mesh.material.color.set(color);
-      spark.mesh.material.opacity = 0.95;
-      spark.mesh.scale.setScalar(0.7 + Math.random() * 0.8);
-      spark.mesh.visible = true;
-      spark.life = spark.max;
-    },
-    shake(amount) {
-      shakeAmount = Math.min(1.2, shakeAmount + amount);
-    },
-    /** Decays every effect and turns the tracers and sparks toward the camera. */
-    update(dt, camera) {
-      for (const flash of flashes) {
-        if (flash.life <= 0) continue;
-        flash.life = Math.max(0, flash.life - dt);
-        flash.mesh.quaternion.copy(camera.quaternion);
-        flash.mesh.material.opacity = 0.95 * (flash.life / flash.max);
-        if (flash.life === 0) flash.mesh.visible = false;
-      }
-      for (const spark of sparks) {
-        if (spark.life <= 0) continue;
-        spark.life = Math.max(0, spark.life - dt);
-        spark.mesh.quaternion.copy(camera.quaternion);
-        spark.mesh.material.opacity = 0.95 * (spark.life / spark.max);
-        spark.mesh.scale.multiplyScalar(1 + dt * 2.2);
-        if (spark.life === 0) spark.mesh.visible = false;
-      }
-      for (const tracer of tracers) {
-        if (tracer.life <= 0) continue;
-        tracer.life = Math.max(0, tracer.life - dt);
-        tracer.line.material.opacity = 0.9 * (tracer.life / tracer.max);
-        if (tracer.life === 0) tracer.line.visible = false;
-      }
-      shakeAmount *= Math.exp(-7 * dt);
-      if (shakeAmount < 0.002) shakeAmount = 0;
-    },
-    get shakeAmount() {
-      return shakeAmount;
-    },
-    /** A small positional jitter for the camera after the rig has placed it. */
-    applyShake(camera) {
-      if (shakeAmount <= 0) return;
-      camera.position.x += (Math.random() - 0.5) * shakeAmount * 0.5;
-      camera.position.y += (Math.random() - 0.5) * shakeAmount * 0.4;
-      camera.position.z += (Math.random() - 0.5) * shakeAmount * 0.5;
-    },
-    reset() {
-      for (const item of [...flashes, ...sparks, ...tracers]) {
-        item.life = 0;
-        item.mesh ? (item.mesh.visible = false) : (item.line.visible = false);
-      }
-      shakeAmount = 0;
-    },
-  };
-}
-
 const effects = createEffects(scene);
+
 const city = createCity(scene, 0x51b0a7, { shadows: !SOFTWARE_RENDERER });
+const audio = createAudio();
 const player = createPlayer(scene, city);
 const traffic = createTraffic(scene, city, { count: 20, seed: 0x7a1f1c });
 const pedestrians = createPedestrians(scene, city, { count: 26, seed: 0x3ed5c0 });
@@ -286,7 +157,10 @@ const missions = createMissions(scene, city, {
   despawnCar: removeCar,
   setWanted: (level) => police.setWanted(level),
   onObjective: (text) => hud.setObjective(text),
-  onBanner: (kind, detail) => hud.showBanner(kind, detail),
+  onBanner: (kind, detail) => {
+    hud.showBanner(kind, detail);
+    if (kind === 'complete') audio.fanfare();
+  },
   onReward: (amount) => {
     economy.addMoney(amount, 'mission');
   },
@@ -313,6 +187,8 @@ const economy = createEconomy(scene, hudRoot, {
   onPurchase: () => {
     autosave.saveNow('purchase');
     hud.setObjective('');
+    audio.chime();
+    effects.sparkle(player.position.x, player.position.y + 1, player.position.z, '#b9ffcd');
   },
 });
 
@@ -330,12 +206,20 @@ const combat = createCombat(scene, city, {
   effects: {
     ...effects,
     damagePlayer: (amount) => hurt(amount),
+    onShot: () => audio.shot(combat.state.smg ? 'smg' : 'pistol'),
+    onSwing: () => audio.hit(),
     onHit: (kind, target, amount) => {
       if (kind === 'pedestrian') police.crime('pedestrian');
       else if (kind === 'officer' || kind === 'policeCar') police.crime('police');
       else if (kind === 'car') {
         police.crime('car');
-        if (target) missions.damageTarget(target, amount);
+        if (target) {
+          missions.damageTarget(target, amount);
+          // A car the player is not sitting in takes real damage: smoke, fire, then a wreck.
+          if (target !== vehicles.active) effects.damageCar(target, amount);
+        }
+      } else if (kind === 'policeCar' && target) {
+        police.damageCar(target, amount);
       }
     },
   },
@@ -347,10 +231,36 @@ const screens = createScreens(screensRoot, {
   onQuit: quitToTitle,
   onContinue: continueRun,
   onNewGame: newGame,
+  onRestart: restartRun,
+  onVolume: (value) => {
+    audio.setVolume(value);
+    audio.unlock();
+    writeSettingsNow();
+  },
+  onMute: () => {
+    audio.toggleMute();
+    syncAudioPanel();
+    writeSettingsNow();
+  },
 });
 
 // The save: written on every mission result, purchase, bust and 30 seconds of play.
 const autosave = createAutosave(() => collectSaveState(), { intervalMs: 30000 });
+
+// The settings live apart from the run's save, so New Game never mutes the city.
+const settings = loadSettings();
+audio.setVolume(settings.volume);
+audio.setMuted(settings.muted);
+
+/** Writes the live audio state back to settings, for the pause menu and the N key. */
+function writeSettingsNow() {
+  writeSettings({ volume: audio.volume, muted: audio.muted });
+  screens.setAudio(audio.volume, audio.muted);
+}
+
+function syncAudioPanel() {
+  screens.setAudio(audio.volume, audio.muted);
+}
 
 const keys = { forward: 0, back: 0, left: 0, right: 0, sprint: false, handbrake: false };
 /** The car the player is beside, chosen each frame for the enter prompt and the E key. */
@@ -368,7 +278,7 @@ let lastHudAmmo = -1;
 let lastBlipSignature = '';
 let smgReserve = 0;
 
-const SUN_OFFSET = new THREE.Vector3(115, 155, 80);
+const SUN_OFFSET = new THREE.Vector3(150, 66, 92);
 
 /** Puts the sun's shadow frustum on the player, so the 240 m box is spent where it is seen. */
 function followSun() {
@@ -388,6 +298,8 @@ function enterMenu() {
     saved ? `$${saved.money.toLocaleString('en-US')} · ${saved.missionsDone} JOB${saved.missionsDone === 1 ? '' : 'S'} DONE` : '');
   screens.showTitle();
   follow.snap(player.position);
+  syncAudioPanel();
+  audio.music(audio.ready);
 }
 
 /** The state a save is written from: the player's situation, never the world's scenery. */
@@ -445,6 +357,12 @@ function newGame() {
   startRun();
 }
 
+/** RESTART on the pause menu: a fresh city without touching the save on the way out. */
+function restartRun() {
+  screens.hidePause();
+  newGame();
+}
+
 /** Continue: the last save's money, garage, guns, jobs and position. */
 function continueRun() {
   const saved = loadSave();
@@ -478,6 +396,8 @@ function startRun() {
   missions.hidePhone();
   autosave.resetClock();
   follow.snap(player.position);
+  audio.unlock();
+  audio.music(true);
   requestPointerLock();
 }
 
@@ -486,6 +406,7 @@ function resumeRun() {
   resetKeys();
   screens.hidePause();
   hud.show();
+  audio.music(true);
   requestPointerLock();
 }
 
@@ -498,7 +419,12 @@ function pauseRun() {
     missionsDone: missions.done,
     carsOwned: economy.ownedCars.length,
   }));
+  syncAudioPanel();
   screens.showPause();
+  audio.music(false);
+  audio.engine(false, 0);
+  audio.skid(0);
+  audio.siren(false, 100);
 }
 
 // -- damage, the two outcomes, and the respawn ----------------------------------------------
@@ -524,6 +450,9 @@ function endRun(kind) {
   hud.setDriving(false);
   hud.setPrompt(null);
   missions.hidePhone();
+  audio.engine(false, 0);
+  audio.skid(0);
+  audio.siren(false, 100);
   // A job the body was taken off is failed, and pays nothing.
   missions.onPlayerDown(kind === 'busted'
     ? 'Busted before the job was done'
@@ -593,6 +522,9 @@ function quitToTitle() {
   screens.hideOutcome();
   hud.setHealth(100);
   hud.setWanted(0, 0);
+  audio.engine(false, 0);
+  audio.skid(0);
+  audio.siren(false, 100);
   player.reset(city.spawn.x, city.spawn.z, city.spawn.heading);
   enterMenu();
 }
@@ -657,6 +589,7 @@ function honk() {
   if (state !== STATE_PLAYING) return;
   const anchor = vehicles.active ? vehicles.active.position : player.position;
   traffic.honk(anchor.x, anchor.z, 30);
+  audio.horn();
 }
 
 /** F: a swing at whoever is in front of the body. */
@@ -691,6 +624,14 @@ function onKeyDown(event) {
   if (event.code === 'Escape') {
     event.preventDefault();
     togglePause();
+    return;
+  }
+  // N mutes anywhere, so a player can silence the city from the pause menu too.
+  if (event.code === 'KeyN') {
+    event.preventDefault();
+    audio.toggleMute();
+    syncAudioPanel();
+    writeSettingsNow();
     return;
   }
   if (state !== STATE_PLAYING) return;
@@ -744,6 +685,16 @@ function onKeyDown(event) {
       economy.buyKey(row);
       break;
     }
+    case 'Equal':
+    case 'NumpadAdd':
+      event.preventDefault();
+      hud.zoomMap(1);
+      break;
+    case 'Minus':
+    case 'NumpadSubtract':
+      event.preventDefault();
+      hud.zoomMap(-1);
+      break;
     default:
       break;
   }
@@ -834,6 +785,8 @@ function frame(now) {
     pedestrians.update(dt, traffic.drainEvents());
     hud.setDriving(false);
     hud.setPrompt(null);
+    audio.engine(false, 0);
+    audio.skid(0);
   }
 
   effects.update(dt, camera);
@@ -873,10 +826,42 @@ function simulate(dt) {
       if (speed > 6 && speed < lastDrivenSpeed - 5 && elapsed - lastCarCrash > 2.2) {
         traffic.crash(vehicles.active.position.x, vehicles.active.position.z, 20);
         police.crime('car');
+        effects.shake(0.4);
+        // The car that was hit wears the impact: a few hits and it smokes, then burns.
+        let closest = null;
+        let closestDistance = 6.5;
+        for (const other of traffic.cars) {
+          if (other === vehicles.active) continue;
+          const distance = Math.hypot(other.position.x - vehicles.active.position.x,
+            other.position.z - vehicles.active.position.z);
+          if (distance < closestDistance) {
+            closest = other;
+            closestDistance = distance;
+          }
+        }
+        if (closest) effects.damageCar(closest, 34);
         lastCarCrash = elapsed;
       }
       lastDrivenSpeed = speed;
-      hud.setPlayerBearing(vehicles.active.heading);
+
+      // The engine's pitch follows the car; the skid howls when the handbrake bites at speed.
+      const car = vehicles.active;
+      const ratio = speed / Math.max(1, car.spec.maxSpeed);
+      audio.engine(true, ratio);
+      const skidStrength = keys.handbrake && speed > 4
+        ? Math.min(1, speed / car.spec.maxSpeed + 0.25) : 0;
+      audio.skid(skidStrength);
+      if (skidStrength > 0.12) {
+        effects.tireSmoke(car.position.x, car.position.z, car.heading, skidStrength);
+        hud.setPlayerBearing(car.heading);
+      } else {
+        hud.setPlayerBearing(car.heading);
+      }
+      // The sea meets the sand; a fast car throws spray off its wheels along the shoreline.
+      if (speed > 7 && Math.random() < dt * 7
+        && car.position.x > CITY.beachStartX - 1 && car.position.x < CITY.waterStartX + 6) {
+        effects.splash(car.position.x + 1.4, car.position.z, 1);
+      }
 
       // Running down a pedestrian is its own crime; the crowd scatters from the impact.
       const struck = pedestrians.hitByCar(
@@ -890,6 +875,12 @@ function simulate(dt) {
       player.update(dt, follow.state.yaw, controls);
       follow.update(dt, player.position);
       hud.setPlayerBearing(player.heading);
+      audio.engine(false, 0);
+      audio.skid(0);
+      // Wading at the waterline throws a little spray.
+      if (player.position.x > CITY.beachStartX + 6 && Math.random() < dt * 5) {
+        effects.splash(player.position.x, player.position.z, 1);
+      }
     }
 
     traffic.update(dt, vehicles.active);
@@ -901,6 +892,16 @@ function simulate(dt) {
       onFoot: !driving,
       activeCar: vehicles.active,
     });
+    // The siren is levelled by the nearest cruiser, so it fades as the chase passes.
+    let nearestCop = Infinity;
+    for (const cop of police.cars) {
+      nearestCop = Math.min(nearestCop,
+        Math.hypot(cop.position.x - player.position.x, cop.position.z - player.position.z));
+    }
+    audio.siren(police.level > 0 && nearestCop < 90, nearestCop);
+    // Smoke at low health, fire below a fifth, one explosion at zero.
+    effects.updateCars(dt, [...traffic.cars, ...vehicles.cars, ...missionCars, ...garageCars,
+      ...police.cars, ...(vehicles.active ? [vehicles.active] : [])]);
     combat.update(dt, { firing: triggerHeld });
     hud.tick(dt);
 
@@ -937,14 +938,17 @@ function simulate(dt) {
     progression.tick(dt, driving ? vehicles.active.speed : 0);
     autosave.tick(dt);
 
-    const blips = [...missions.blips(), ...economy.blips()];
-    const signature = blips.map((blip) => `${blip.x.toFixed(0)},${blip.z.toFixed(0)},${blip.kind}`).join('|');
-    if (signature !== lastBlipSignature) {
-      lastBlipSignature = signature;
-      hud.setBlips(blips, player.position.x, player.position.z);
-    } else {
-      hud.setBlips(blips, player.position.x, player.position.z);
-    }
+    // The map: the story's blip and the shops, the police cruisers that are actually out,
+    // the traffic as small dots, and the body or the car at its centre.
+    const blips = [...missions.blips(), ...economy.blips(),
+      ...police.cars.map((car) => ({ x: car.position.x, z: car.position.z, kind: 'police' }))];
+    const anchor = vehicles.active ? vehicles.active.position : player.position;
+    const trafficDots = traffic.cars.filter((car) => !car.driver)
+      .map((car) => ({ x: car.position.x, z: car.position.z }));
+    hud.setMap({
+      x: anchor.x, z: anchor.z, blips, traffic: trafficDots, wanted, time: elapsed,
+    });
+    lastBlipSignature = '';
   }
 }
 
@@ -1032,6 +1036,37 @@ window.__sunbay = {
   economy,
   progression,
   autosave,
+  audio,
+  effects,
+  get minimap() {
+    return hud.minimap;
+  },
+  /** The audio settings as the pause menu shows them, for the smoke test. */
+  settings: {
+    get volume() {
+      return audio.volume;
+    },
+    get muted() {
+      return audio.muted;
+    },
+    setVolume: (value) => {
+      const next = audio.setVolume(value);
+      writeSettingsNow();
+      return next;
+    },
+    setMuted: (value) => {
+      const next = audio.setMuted(value);
+      writeSettingsNow();
+      return next;
+    },
+    toggleMute: () => {
+      const next = audio.toggleMute();
+      writeSettingsNow();
+      return next;
+    },
+    pause: () => pauseRun(),
+    resume: () => resumeRun(),
+  },
   save: {
     load: () => {
       const data = loadSave();

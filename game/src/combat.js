@@ -288,6 +288,7 @@ export function createCombat(scene, city, options = {}) {
     state.punchCooldown = PUNCH_COOLDOWN;
     state.punching = 0.3;
     effects.shake?.(0.12);
+    effects.onSwing?.();
     const heading = player.heading;
     const forwardX = Math.sin(heading);
     const forwardZ = Math.cos(heading);

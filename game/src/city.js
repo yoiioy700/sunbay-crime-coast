@@ -169,6 +169,172 @@ function roadPlane(width, length, tileMetres = 6) {
   return geometry;
 }
 
+/** The ads on Sunbay's boards: each its own palette and copy, all written for this game. */
+const BILLBOARDS = [
+  {
+    title: 'TACO CANNON',
+    copy: '2 FOR 1 · ALL NIGHT',
+    tag: 'BEACH & 9TH',
+    sky: ['#3a1d2c', '#7c2d34'],
+    ink: '#ffe2a8',
+    accent: '#ff7a4d',
+  },
+  {
+    title: 'BRAINROT BEANS',
+    copy: 'NOW WITH 30% MORE BEANS',
+    tag: 'THE BEAN WITH AN AGENDA',
+    sky: ['#20321f', '#4d6a2e'],
+    ink: '#e9ff9c',
+    accent: '#b6e04b',
+  },
+  {
+    title: 'SUNBAY TANNING',
+    copy: 'FRY RESPONSIBLY',
+    tag: 'SPF WHATEVER · OPEN LATE',
+    sky: ['#3d2430', '#c9632f'],
+    ink: '#fff2cf',
+    accent: '#ffbe5c',
+  },
+  {
+    title: 'SHELLSHOCK TOWING',
+    copy: "WE'LL DRAG ANYTHING",
+    tag: 'NO QUESTIONS · CASH UP FRONT',
+    sky: ['#101f2e', '#1f4a63'],
+    ink: '#cdf2ff',
+    accent: '#62c8ff',
+  },
+  {
+    title: "MAMA ROSA'S",
+    copy: 'THE PASTEL IS NOT A CRIME',
+    tag: 'PAWN · JOBS · PASTRIES',
+    sky: ['#2b1430', '#6b2b5c'],
+    ink: '#ffd9f2',
+    accent: '#ff8ad0',
+  },
+  {
+    title: 'COASTLINE GT',
+    copy: '0 TO REGRET IN 4.2',
+    tag: 'CORAL MOTORS · SEE LOT',
+    sky: ['#231b12', '#6a4a22'],
+    ink: '#fff0c4',
+    accent: '#ffcf92',
+  },
+];
+
+/** Draws one ad onto a fresh canvas texture: a band, a display line, a small tag. */
+function createBillboardTexture(ad) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  const sky = context.createLinearGradient(0, 0, 0, 256);
+  sky.addColorStop(0, ad.sky[0]);
+  sky.addColorStop(1, ad.sky[1]);
+  context.fillStyle = sky;
+  context.fillRect(0, 0, 512, 256);
+
+  // A sun-striped corner, the same motif on every board, in the ad's own accent.
+  context.fillStyle = ad.accent;
+  context.globalAlpha = 0.18;
+  for (let stripe = 0; stripe < 6; stripe += 1) {
+    context.fillRect(392 + stripe * 16, 0, 7, 256);
+  }
+  context.globalAlpha = 1;
+  context.strokeStyle = ad.accent;
+  context.lineWidth = 6;
+  context.strokeRect(8, 8, 496, 240);
+
+  context.fillStyle = ad.ink;
+  context.textBaseline = 'alphabetic';
+  context.font = '900 60px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+  context.letterSpacing = '1px';
+  fitText(context, ad.title, 470, 60, 28);
+  context.fillText(ad.title, 30, 108);
+  context.fillStyle = ad.accent;
+  context.font = '800 34px ui-sans-serif, system-ui, sans-serif';
+  fitText(context, ad.copy, 456, 34, 17);
+  context.fillText(ad.copy, 30, 162);
+  context.fillStyle = 'rgba(255,255,255,0.62)';
+  context.font = '700 17px ui-sans-serif, system-ui, sans-serif';
+  context.letterSpacing = '3px';
+  context.fillText(ad.tag, 30, 208);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+/** Shrinks the font until `text` fits `maxWidth`, never below `floor`. */
+function fitText(context, text, maxWidth, size, floor) {
+  let current = size;
+  while (context.measureText(text).width > maxWidth && current > floor) {
+    current -= 2;
+    context.font = context.font.replace(/\d+px/, `${current}px`);
+  }
+}
+
+/**
+ * The boards' places: a rooftop sign on a few tall buildings near the middle, and two
+ * hoardings at street level by the beach promenade and the south perimeter. Returns plain
+ * data so the mesh building stays in one place.
+ */
+function billboardSpots(buildings, halfSpan) {
+  const tall = buildings
+    .filter((building) => building.height > 26 && Math.abs(building.x) < halfSpan - 30
+      && Math.abs(building.z) < halfSpan - 30)
+    .sort((a, b) => b.height - a.height);
+  const spots = [];
+  for (let index = 0; index < 4 && index < tall.length; index += 2) {
+    const building = tall[index];
+    if (!building) continue;
+    spots.push({
+      x: building.x,
+      y: building.height + 0.5 + 3.6,
+      z: building.z,
+      width: 15,
+      height: 7.5,
+      heading: (index % 2) * Math.PI + Math.PI / 2,
+      roof: true,
+    });
+  }
+  spots.push({ x: 166.5, y: 5.2, z: -34, width: 13, height: 5.5, heading: -Math.PI / 2, roof: false });
+  spots.push({ x: 18, y: 5.2, z: halfSpan - 3, width: 13, height: 5.5, heading: Math.PI, roof: false });
+  return spots;
+}
+
+/** Builds the boards into the scene: one textured plane each and one merged frame mesh. */
+function addBillboards(group, spots) {
+  const frames = createBuilder();
+  const steel = new THREE.Color('#5a6169');
+  const planeGeometry = new THREE.PlaneGeometry(1, 1);
+  spots.forEach((spot, index) => {
+    const ad = BILLBOARDS[index % BILLBOARDS.length];
+    const texture = createBillboardTexture(ad);
+    const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+    const board = new THREE.Mesh(planeGeometry, material);
+    board.scale.set(spot.width, spot.height, 1);
+    board.position.set(spot.x, spot.y, spot.z);
+    board.rotation.y = spot.heading;
+    group.add(board);
+
+    // The frame: two posts for a hoarding, a low cradle for a rooftop sign.
+    const base = new THREE.Matrix4().makeTranslation(spot.x, 0, spot.z)
+      .multiply(new THREE.Matrix4().makeRotationY(spot.heading));
+    const legHeight = spot.roof ? 1.2 : spot.y - spot.height / 2;
+    for (const side of [-1, 1]) {
+      frames.boxAt(base, [0.28, legHeight, 0.28],
+        [side * (spot.width / 2 - 0.6), spot.y - spot.height / 2 - legHeight / 2 + (spot.roof ? 0.6 : 0), 0], steel);
+    }
+    frames.boxAt(base, [spot.width + 0.5, 0.22, 0.22], [0, spot.y + spot.height / 2 + 0.08, 0], steel);
+    frames.boxAt(base, [spot.width + 0.5, 0.22, 0.22], [0, spot.y - spot.height / 2 - 0.08, 0], steel);
+  });
+  if (!frames.empty) {
+    const mesh = frames.build(new THREE.MeshLambertMaterial({ vertexColors: true }), { castShadow: true });
+    group.add(mesh);
+  }
+}
+
 export function createCity(scene, seed = 0x51b0a7, options = {}) {
   const { shadows = true } = options;
   const rng = createRng(seed);
@@ -484,17 +650,70 @@ export function createCity(scene, seed = 0x51b0a7, options = {}) {
   const towels = ['#ef7d5e', '#4b9fd1', '#f0c455', '#5c6a73'].map(tint);
 
   const shades = createBuilder();
-  for (let index = 0; index < 9; index += 1) {
-    const x = 174 + rng.range(0, 9);
-    const z = -halfSpan + 20 + index * 14 + rng.range(-2, 2);
+  for (let index = 0; index < 14; index += 1) {
+    const x = 173.5 + rng.range(0, 10);
+    const z = -halfSpan + 16 + index * 11.5 + rng.range(-2, 2);
     const pole = new THREE.CylinderGeometry(0.05, 0.05, 2.5, 5);
     shades.add(pole, new THREE.Matrix4().makeTranslation(x, 1.25, z), white);
     pole.dispose();
     const canopy = new THREE.ConeGeometry(1.9, 0.7, 8);
-    shades.add(canopy, new THREE.Matrix4().makeTranslation(x, 2.65, z), tint(index % 2 ? '#ef7d5e' : '#f2dfae'));
+    shades.add(canopy, new THREE.Matrix4().makeTranslation(x, 2.65, z),
+      tint(['#ef7d5e', '#f2dfae', '#4b9fd1', '#f0c455'][index % 4]));
     canopy.dispose();
+    // A second, lower shade beside some of them, so the beach reads as a crowd not a row.
+    if (index % 3 === 0) {
+      const x2 = x + rng.range(3.5, 6.5);
+      const z2 = z + rng.range(-2.5, 2.5);
+      const pole2 = new THREE.CylinderGeometry(0.05, 0.05, 2.1, 5);
+      shades.add(pole2, new THREE.Matrix4().makeTranslation(x2, 1.05, z2), white);
+      pole2.dispose();
+      const canopy2 = new THREE.ConeGeometry(1.5, 0.6, 8);
+      shades.add(canopy2, new THREE.Matrix4().makeTranslation(x2, 2.25, z2),
+        tint(index % 2 ? '#64a6b8' : '#e8792e'));
+      canopy2.dispose();
+      solids.box([1.1, 0.03, 2.1], [x2 + 1.5, 0.02, z2 - 0.4], towels[index % towels.length]);
+    }
     solids.box([1.1, 0.03, 2.1], [x + 1.9, 0.02, z + 0.4], towels[index % towels.length]);
   }
+
+  // -- the pier: piles under a plank deck, a rail and a small chum shack at the end ------------
+  const pierZ = 18;
+  const pierStart = waterStartX - 4;
+  const pierLength = 58;
+  const pierDeck = createBuilder();
+  const pierWood = tint('#a5845c');
+  const pierDark = tint('#7b6040');
+  const pierEnd = pierStart + pierLength;
+  for (let plank = 0; plank < pierLength / 1.4; plank += 1) {
+    const z = pierStart + plank * 1.4 + 0.7;
+    pierDeck.box([4.2, 0.16, 1.32], [pierStart + 0.4, 1.2, z], plank % 2 ? pierWood : tint('#b08d62'));
+  }
+  for (const offsetX of [-2, -0.7, 0.7, 2]) {
+    for (let pile = 0; pile < 12; pile += 1) {
+      const z = pierStart + 1.5 + pile * 5;
+      const post = new THREE.CylinderGeometry(0.16, 0.19, 4.6, 6);
+      pierDeck.add(post, new THREE.Matrix4().makeTranslation(pierStart + 0.4 + offsetX, -0.9, z), pierDark);
+      post.dispose();
+    }
+  }
+  for (const offsetX of [-2.05, 2.05]) {
+    for (const [y, railing] of [[1.95, 0.1], [2.62, 0.09]]) {
+      void railing;
+      pierDeck.box([0.09, 0.09, pierLength - 1], [pierStart + 0.4 + offsetX, y, pierStart + pierLength / 2], pierDark);
+    }
+    for (let post = 0; post < 10; post += 1) {
+      pierDeck.box([0.1, 0.9, 0.1],
+        [pierStart + 0.4 + offsetX, 2.2, pierStart + 2 + post * (pierLength / 10)], pierDark);
+    }
+  }
+  // The shack: a box with a roof and a warm window, at the far end.
+  pierDeck.box([3.4, 2.5, 3.2], [pierStart + 0.4, 2.5, pierEnd - 3.2], tint('#c9d6c0'));
+  pierDeck.box([3.9, 0.24, 3.7], [pierStart + 0.4, 3.86, pierEnd - 3.2], tint('#8f4b3a'));
+  pierDeck.box([0.06, 1.1, 1.6], [pierStart + 0.4 - 1.72, 2.6, pierEnd - 3.2], tint('#ffcf92'));
+  // An out-of-place deck chair or two, for scale.
+  pierDeck.box([0.7, 0.08, 1.8], [pierStart + 2.3, 1.55, pierEnd - 9], tint('#ef7d5e'));
+  pierDeck.box([0.7, 0.5, 0.08], [pierStart + 2.3, 1.8, pierEnd - 9.9], tint('#ef7d5e'));
+  pierDeck.box([0.7, 0.08, 1.8], [pierStart - 1.5, 1.55, pierEnd - 12], tint('#4b9fd1'));
 
   const water = new THREE.Mesh(new THREE.PlaneGeometry(900, 900, 1, 1), materials.water);
   water.rotation.x = -Math.PI / 2;
@@ -510,6 +729,9 @@ export function createCity(scene, seed = 0x51b0a7, options = {}) {
   foam.rotation.x = -Math.PI / 2;
   foam.position.set(waterStartX - 1.4, -0.12, 0);
   group.add(foam);
+
+  // -- billboards: original ads on hoardings and rooftops, drawn to canvas ---------------------
+  addBillboards(group, billboardSpots(buildings, halfSpan));
 
   // -- assemble the merged meshes ------------------------------------------------------------
   if (!facades.empty) group.add(facades.build(materials.windows, { castShadow: true, receiveShadow: true }));
@@ -528,16 +750,17 @@ export function createCity(scene, seed = 0x51b0a7, options = {}) {
   if (!carGlass.empty) group.add(carGlass.build(materials.solid));
   if (!carWheels.empty) group.add(carWheels.build(materials.solid));
   if (!shades.empty) group.add(shades.build(materials.solid, { castShadow: true }));
+  if (!pierDeck.empty) group.add(pierDeck.build(materials.solid, { castShadow: true, receiveShadow: true }));
 
-  // -- light and air -------------------------------------------------------------------------
-  scene.background = new THREE.Color('#9fd8ef');
-  scene.fog = new THREE.Fog('#b7dff0', 130, 470);
+  // -- light and air: late afternoon, the sun low in the west, the sea catching it ------------
+  scene.background = new THREE.Color('#f2c295');
+  scene.fog = new THREE.Fog('#f0bd93', 150, 520);
 
-  const hemisphere = new THREE.HemisphereLight('#cfeaff', '#7a6448', 1.15);
+  const hemisphere = new THREE.HemisphereLight('#ffd7a8', '#6b5a46', 1.05);
   scene.add(hemisphere);
 
-  const sun = new THREE.DirectionalLight('#fff2d6', 2.35);
-  sun.position.set(120, 165, 85);
+  const sun = new THREE.DirectionalLight('#ffd9a0', 2.15);
+  sun.position.set(-140, 78, 120);
   sun.target.position.set(0, 0, 0);
   sun.castShadow = shadows;
   sun.shadow.mapSize.set(1024, 1024);

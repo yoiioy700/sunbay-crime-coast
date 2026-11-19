@@ -12,9 +12,12 @@ const CONTROLS = [
   ['SHIFT', 'Sprint'],
   ['SPACE', 'Jump · handbrake'],
   ['E', 'Enter · exit a car'],
+  ['LMB', 'Fire'],
+  ['F', 'Punch'],
   ['H', 'Honk'],
-  ['MOUSE', 'Look around'],
-  ['WHEEL', 'Camera distance'],
+  ['M', 'Phone · jobs'],
+  ['N', 'Mute'],
+  ['+ −', 'Minimap zoom'],
   ['ESC', 'Pause'],
 ];
 
@@ -25,7 +28,73 @@ function el(tag, style, html) {
   return node;
 }
 
-export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNewGame }) {
+/**
+ * The SUNBAY wordmark on its own canvas: blocky letters cut out of a sunset gradient, a sun
+ * disc half-sunk behind the skyline, and two sea lines under it. Original art, drawn here.
+ */
+function drawLogotype(canvas) {
+  const context = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  context.clearRect(0, 0, width, height);
+
+  // Warm sky behind the letters, a low sun on the right and a dark sea band at the waterline.
+  const sky = context.createLinearGradient(0, 0, 0, height);
+  sky.addColorStop(0, 'rgba(255,214,150,0)');
+  sky.addColorStop(0.62, 'rgba(255,170,96,0.18)');
+  sky.addColorStop(1, 'rgba(120,30,40,0.06)');
+  context.fillStyle = sky;
+  context.fillRect(0, 0, width, height);
+  const sunX = width * 0.855;
+  const sunY = height * 0.6;
+  const sun = context.createRadialGradient(sunX, sunY, 6, sunX, sunY, height * 0.34);
+  sun.addColorStop(0, 'rgba(255,226,160,0.85)');
+  sun.addColorStop(0.55, 'rgba(255,150,80,0.34)');
+  sun.addColorStop(1, 'rgba(255,110,60,0)');
+  context.fillStyle = sun;
+  context.beginPath();
+  context.arc(sunX, sunY, height * 0.34, 0, Math.PI * 2);
+  context.fill();
+
+  // The wordmark.
+  context.font = `900 ${height * 0.72}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif`;
+  context.textBaseline = 'alphabetic';
+  context.letterSpacing = '6px';
+  const text = 'SUNBAY';
+  const metrics = context.measureText(text);
+  const textX = 8;
+  const textY = height * 0.76;
+  const gradient = context.createLinearGradient(0, height * 0.14, 0, height * 0.82);
+  gradient.addColorStop(0, '#fff6e2');
+  gradient.addColorStop(0.42, '#ffd79a');
+  gradient.addColorStop(0.8, '#f2a45e');
+  gradient.addColorStop(1, '#d97a52');
+  context.fillStyle = gradient;
+  context.fillText(text, textX, textY);
+  context.lineWidth = 3;
+  context.strokeStyle = 'rgba(30,14,10,0.28)';
+  context.strokeText(text, textX, textY);
+
+  // A cut through the lower third of the letters, like a horizon, and the road it hides.
+  const cutY = height * 0.62;
+  const cutHeight = height * 0.045;
+  const fade = context.createLinearGradient(0, cutY, 0, cutY + cutHeight);
+  fade.addColorStop(0, 'rgba(10,22,28,0.0)');
+  fade.addColorStop(0.5, 'rgba(10,22,28,0.55)');
+  fade.addColorStop(1, 'rgba(10,22,28,0.0)');
+  context.fillStyle = fade;
+  context.fillRect(textX, cutY, metrics.width, cutHeight);
+
+  // Two sea lines under the word: a wide pale rule and a short bright one.
+  context.fillStyle = 'rgba(255,214,150,0.85)';
+  context.fillRect(textX + 3, textY + 18, metrics.width * 0.94, 3);
+  context.fillStyle = 'rgba(255,120,90,0.9)';
+  context.fillRect(textX + 3, textY + 30, metrics.width * 0.34, 3);
+}
+
+export function createScreens(root, {
+  onPlay, onResume, onQuit, onContinue, onNewGame, onRestart, onVolume, onMute,
+}) {
   root.innerHTML = '';
 
   // -- title card ---------------------------------------------------------------------------
@@ -46,12 +115,26 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
       'font-size:clamp(10px,1.1vw,13px);letter-spacing:0.52em;color:#ffcf92;margin-bottom:10px;',
       'A COASTAL CITY · A CRIME STORY',
     ),
-    el(
-      'h1',
-      'margin:0;font-size:clamp(58px,10vw,132px);line-height:0.88;font-weight:900;letter-spacing:-0.035em;' +
-        'text-shadow:0 10px 40px rgba(0,0,0,0.45);',
-      `${TITLE}: <span style="color:#ffcf92;font-weight:600;letter-spacing:-0.02em;font-size:0.52em">${STORY}</span>`,
-    ),
+  );
+
+  // The logotype: SUNBAY drawn on its own canvas — a sun low over a two-line sea, the letters
+  // clipped out of a sunset gradient — so the wordmark is ours and never a font file.
+  const logo = document.createElement('canvas');
+  logo.width = 1024;
+  logo.height = 300;
+  logo.dataset.logotype = '';
+  logo.style.cssText = 'display:block;width:min(620px,74vw);height:auto;margin:0 0 4px;' +
+    'filter:drop-shadow(0 10px 34px rgba(0,0,0,0.42))';
+  drawLogotype(logo);
+  titleInner.append(logo);
+  const storyLine = el(
+    'div',
+    'font-size:clamp(20px,2.6vw,34px);font-weight:600;letter-spacing:0.34em;color:rgba(255,244,226,0.9);' +
+      'text-transform:uppercase;margin:-4px 0 0 6px;',
+    STORY,
+  );
+  titleInner.append(
+    storyLine,
     el(
       'p',
       'margin:18px 0 0;max-width:520px;font-size:clamp(13px,1.25vw,16px);line-height:1.6;color:rgba(255,244,226,0.78);',
@@ -140,6 +223,11 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
     el('div', 'font-size:11px;letter-spacing:0.16em;color:rgba(255,244,226,0.5)', 'CLICK TO ENTER THE CITY'),
   );
   titleInner.append(playRow, continueRow);
+  titleInner.append(el(
+    'div',
+    'margin-top:22px;font-size:9px;letter-spacing:0.22em;color:rgba(255,244,226,0.38)',
+    'AN ORIGINAL MAKE.FUN BOUNTY GAME · EVERY SOUND SYNTHESISED IN THE BROWSER',
+  ));
   title.append(titleInner);
 
   // -- pause menu ---------------------------------------------------------------------------
@@ -169,6 +257,16 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
   );
   resumeButton.type = 'button';
   resumeButton.addEventListener('click', () => onResume());
+  const restartButton = el(
+    'button',
+    'appearance:none;margin-top:10px;width:100%;cursor:pointer;padding:12px;border-radius:5px;' +
+      'background:transparent;border:1px solid rgba(255,207,146,0.4);color:#ffe0a8;' +
+      'font:700 12px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:0.26em;',
+    'RESTART CITY',
+  );
+  restartButton.type = 'button';
+  restartButton.dataset.action = 'restart';
+  restartButton.addEventListener('click', () => onRestart?.());
   const quitButton = el(
     'button',
     'appearance:none;margin-top:10px;width:100%;cursor:pointer;padding:13px;border-radius:5px;' +
@@ -178,6 +276,61 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
   );
   quitButton.type = 'button';
   quitButton.addEventListener('click', () => onQuit());
+
+  // -- audio: the volume slider and the mute toggle -------------------------------------------
+  const audioBox = el(
+    'div',
+    'margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,244,226,0.12);',
+  );
+  const audioHead = el('div', 'display:flex;justify-content:space-between;align-items:center;' +
+    'font-size:9px;letter-spacing:0.34em;color:#ffcf92', 'AUDIO');
+  const muteButton = el(
+    'button',
+    'appearance:none;cursor:pointer;padding:5px 10px;border-radius:4px;border:1px solid rgba(255,244,226,0.26);' +
+      'background:rgba(9,20,27,0.5);color:#fff4e2;font:700 9px/1 ui-sans-serif,system-ui,sans-serif;' +
+      'letter-spacing:0.2em;',
+    'MUTE N',
+  );
+  muteButton.type = 'button';
+  muteButton.dataset.action = 'mute';
+  muteButton.addEventListener('click', () => onMute?.());
+  audioHead.append(muteButton);
+
+  const volumeRow = el('div', 'display:flex;align-items:center;gap:10px;margin-top:12px;');
+  const slider = el(
+    'input',
+    'flex:1;appearance:none;-webkit-appearance:none;height:4px;border-radius:2px;' +
+      'background:linear-gradient(90deg,#ffcf92 70%, rgba(255,244,226,0.18) 70%);outline:none;cursor:pointer;',
+  );
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '100';
+  slider.value = '70';
+  slider.dataset.action = 'volume';
+  slider.setAttribute('aria-label', 'Master volume');
+  const volumeValue = el('div', 'width:34px;text-align:right;font-size:11px;font-weight:700;' +
+    'letter-spacing:0.04em;font-variant-numeric:tabular-nums', '70%');
+  slider.addEventListener('input', () => {
+    const percent = Number(slider.value);
+    volumeValue.textContent = `${percent}%`;
+    slider.style.background =
+      `linear-gradient(90deg,#ffcf92 ${percent}%, rgba(255,244,226,0.18) ${percent}%)`;
+    onVolume?.(percent / 100);
+  });
+  volumeRow.append(slider, volumeValue);
+  audioBox.append(audioHead, volumeRow);
+
+  /** Writes the live audio state back into the panel: slider, percentage and MUTE label. */
+  function setAudio(volume = 0.7, muted = false) {
+    const percent = Math.round(Math.max(0, Math.min(1, volume)) * 100);
+    slider.value = String(percent);
+    volumeValue.textContent = `${percent}%`;
+    slider.style.background =
+      `linear-gradient(90deg,#ffcf92 ${percent}%, rgba(255,244,226,0.18) ${percent}%)`;
+    muteButton.textContent = muted ? 'UNMUTE N' : 'MUTE N';
+    muteButton.style.color = muted ? '#ff9f8a' : '#fff4e2';
+    audioBox.style.opacity = muted ? '0.6' : '1';
+  }
 
   // The stats card: missions run, cars kept, the fastest the player has driven and the clock.
   const statsBox = el(
@@ -214,13 +367,15 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
 
   pausePanel.append(
     resumeButton,
+    restartButton,
     quitButton,
     statsBox,
+    audioBox,
     el(
       'div',
       'margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,244,226,0.12);' +
         'font-size:11px;line-height:1.8;color:rgba(255,244,226,0.55);letter-spacing:0.04em;',
-      'Esc resumes · E enters a car · H honks<br>M or Tab opens Mama Rosa\'s phone · Space jumps or slides',
+      'Esc resumes · E enters a car · H honks<br>M or Tab opens Mama Rosa\'s phone · N mutes · + − zooms the map',
     ),
   );
   pause.append(pausePanel);
@@ -330,6 +485,7 @@ export function createScreens(root, { onPlay, onResume, onQuit, onContinue, onNe
     showPause,
     hidePause,
     setStats,
+    setAudio,
     showOutcome,
     setOutcomeCountdown,
     hideOutcome,

@@ -12,7 +12,11 @@
 // access is wrapped, so the game runs without a save able to be kept.
 
 export const SAVE_KEY = 'sunbay.crimecoast.save';
+export const SETTINGS_KEY = 'sunbay.crimecoast.settings';
 export const SAVE_VERSION = 1;
+
+/** The volume and mute the pause menu owns; stored apart from a run's save. */
+export const DEFAULT_SETTINGS = { volume: 0.7, muted: false };
 
 /** The numbers a fresh run starts with. */
 export const NEW_GAME = {
@@ -126,6 +130,41 @@ export function clearSave() {
 
 export function hasSave() {
   return loadSave() !== null;
+}
+
+/**
+ * The settings: volume and mute, in their own key so they survive New Game and are read
+ * before the title is drawn. A broken or missing document takes the defaults.
+ */
+export function loadSettings() {
+  const store = storage();
+  if (!store) return { ...DEFAULT_SETTINGS };
+  try {
+    const raw = store.getItem(SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const data = JSON.parse(raw);
+    return {
+      volume: Number.isFinite(data?.volume)
+        ? Math.max(0, Math.min(1, data.volume)) : DEFAULT_SETTINGS.volume,
+      muted: Boolean(data?.muted),
+    };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+export function writeSettings(settings) {
+  const store = storage();
+  if (!store) return false;
+  try {
+    store.setItem(SETTINGS_KEY, JSON.stringify({
+      volume: Math.max(0, Math.min(1, settings.volume ?? DEFAULT_SETTINGS.volume)),
+      muted: Boolean(settings.muted),
+    }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
